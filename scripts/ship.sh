@@ -11,6 +11,10 @@
 #
 # Config: .codereviewrc (key=value) — pr_automation, pr_host, pr_merge_method,
 #         pr_self_approve, pr_poll_interval, pr_poll_timeout.
+#
+# pr_automation is off by default — a fresh clone has no .codereviewrc, and a
+# push should never silently start opening and merging PRs. Turn it on with
+# `make auto-pr`, or by answering yes to the prompt `make setup` runs once.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -18,7 +22,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 source "$script_dir/lib/common.sh"
 
 pr_automation=$(rc_get pr_automation)
-pr_automation=${pr_automation:-true}
+pr_automation=${pr_automation:-false}
 
 branch=$(git rev-parse --abbrev-ref HEAD)
 base=$(default_branch)
@@ -35,7 +39,7 @@ if ! git push -u origin "$branch"; then
 fi
 
 if [ "$pr_automation" != "true" ]; then
-    echo "pr_automation=false in .codereviewrc — pushed only, open the PR yourself."
+    echo "Auto-PR is off (pr_automation != true) — pushed only, open the PR yourself. Run 'make auto-pr' to enable it."
     exit 0
 fi
 
