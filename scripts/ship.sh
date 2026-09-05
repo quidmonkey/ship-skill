@@ -10,11 +10,17 @@
 # today, and nothing PR-related runs until that gate is clear.
 #
 # Config: .codereviewrc (key=value) — pr_automation, pr_host, pr_merge_method,
-#         pr_self_approve, pr_poll_interval, pr_poll_timeout.
+#         pr_self_approve, pr_poll_interval, pr_poll_timeout, ship_fix_retries.
 #
 # pr_automation is off by default — a fresh clone has no .codereviewrc, and a
 # push should never silently start opening and merging PRs. Turn it on with
 # `make auto-pr`, or by answering yes to the prompt `make setup` runs once.
+#
+# ship_fix_retries: if code-review.sh's fix loop (fix_enabled=true, the
+# default) resolves every REQUIRED finding, the fix is left uncommitted — the
+# hook itself never commits or pushes on its own (see $autofix_marker in
+# lib/common.sh). This script offers, with one confirmation, to commit that
+# fix and push again, up to ship_fix_retries times.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -23,6 +29,14 @@ source "$script_dir/lib/common.sh"
 
 pr_automation=$(rc_get pr_automation)
 pr_automation=${pr_automation:-false}
+ship_fix_retries=$(rc_get ship_fix_retries)
+ship_fix_retries=${ship_fix_retries:-1}
+case "$ship_fix_retries" in
+    '' | *[!0-9]*)
+        echo "ERROR: ship_fix_retries must be a non-negative integer in .codereviewrc — stopping." >&2
+        exit 1
+        ;;
+esac
 
 branch=$(git rev-parse --abbrev-ref HEAD)
 base=$(default_branch)
@@ -32,11 +46,58 @@ if [ "$branch" = "$base" ]; then
     exit 1
 fi
 
-echo "Pushing $branch (runs the code review gate — can take a few minutes)..."
-if ! git push -u origin "$branch"; then
-    echo "ERROR: push failed, or was blocked by the code review gate — nothing shipped." >&2
-    exit 1
-fi
+attempt=0
+while :; do
+    # Cleared before every attempt: only a marker written by *this* push's
+    # hook run should be trusted as evidence of what just happened.
+    rm -f "$autofix_marker"
+    if [ "$attempt" -eq 0 ]; then
+        echo "Pushing $branch (runs the code review gate — can take a few minutes)..."
+    else
+        echo "Pushing $branch again (attempt $((attempt + 1)))..."
+    fi
+
+    if git push -u origin "$branch"; then
+        break
+    fi
+
+    if [ ! -f "$autofix_marker" ] || [ "$attempt" -ge "$ship_fix_retries" ]; then
+        echo "ERROR: push failed, or was blocked by the code review gate — nothing shipped." >&2
+        exit 1
+    fi
+
+    echo ""
+    echo "Code review's auto-fix resolved every REQUIRED finding; the fixes below are"
+    echo "uncommitted in your working tree:"
+    echo ""
+    git status --porcelain
+    echo ""
+    git --no-pager diff
+    echo ""
+    if [ -t 0 ]; then
+        printf 'Commit these fixes and push again? [y/N] '
+        read -r reply
+    else
+        reply=n
+        echo "Not an interactive shell — treating that as no."
+    fi
+    case "$reply" in
+        [yY]*) ;;
+        *)
+            echo "Leaving the fixes uncommitted. Review the diff, commit, and run 'make ship' again."
+            exit 1
+            ;;
+    esac
+
+    git add -A
+    if ! git commit -q -m "Apply code review auto-fix" \
+        -m "Auto-fix resolved the REQUIRED findings from the pre-push code review." \
+        -m "See working/code-review-report.md (local, gitignored) for what was found and fixed."; then
+        echo "ERROR: nothing to commit — the fix may have been a no-op. Check the working tree." >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+done
 
 if [ "$pr_automation" != "true" ]; then
     echo "Auto-PR is off (pr_automation != true) — pushed only, open the PR yourself. Run 'make auto-pr' to enable it."
