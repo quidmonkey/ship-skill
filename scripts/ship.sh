@@ -21,6 +21,10 @@
 # hook itself never commits or pushes on its own (see $autofix_marker in
 # lib/common.sh). This script offers, with one confirmation, to commit that
 # fix and push again, up to ship_fix_retries times.
+#
+# When pr_automation=true, the gh/az CLI is checked for install + login
+# before anything is pushed. Missing either prints a friendly message and
+# exits without touching the branch.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -44,6 +48,50 @@ base=$(default_branch)
 if [ "$branch" = "$base" ]; then
     echo "ERROR: on the default branch ($base) — nothing to ship." >&2
     exit 1
+fi
+
+# --- PR host auth check (before anything is pushed) ----------------------------
+# pr_automation is the only reason this script ever touches gh/az. Check the
+# CLI is installed and logged in up front, so a missing login doesn't strand
+# the branch already pushed with no PR to show for it.
+if [ "$pr_automation" = "true" ]; then
+    pr_host=$(rc_get pr_host)
+    if [ -z "$pr_host" ]; then
+        origin_url=$(git remote get-url origin 2>/dev/null || true)
+        case "$origin_url" in
+            *github.com*) pr_host=gh ;;
+            *) pr_host=az ;;
+        esac
+    fi
+
+    case "$pr_host" in
+    gh)
+        if ! command -v gh >/dev/null 2>&1; then
+            echo "make ship: pr_automation is on but the gh CLI isn't installed."
+            echo "Install it from https://cli.github.com, or set pr_automation=false in .codereviewrc. Nothing was pushed."
+            exit 1
+        fi
+        if ! gh auth status >/dev/null 2>&1; then
+            echo "make ship: gh CLI isn't logged in. Run 'gh auth login', then try again. Nothing was pushed."
+            exit 1
+        fi
+        ;;
+    az)
+        if ! command -v az >/dev/null 2>&1; then
+            echo "make ship: pr_automation is on but the az CLI isn't installed."
+            echo "Install it, or set pr_automation=false in .codereviewrc. Nothing was pushed."
+            exit 1
+        fi
+        if ! az account show >/dev/null 2>&1; then
+            echo "make ship: az CLI isn't logged in. Run 'az login', then try again. Nothing was pushed."
+            exit 1
+        fi
+        ;;
+    *)
+        echo "ERROR: unknown pr_host '$pr_host' in .codereviewrc (gh | az)." >&2
+        exit 1
+        ;;
+    esac
 fi
 
 attempt=0
@@ -103,21 +151,6 @@ if [ "$pr_automation" != "true" ]; then
     echo "Auto-PR is off (pr_automation != true) — pushed only, open the PR yourself. Run 'make auto-pr' to enable it."
     exit 0
 fi
-
-pr_host=$(rc_get pr_host)
-if [ -z "$pr_host" ]; then
-    origin_url=$(git remote get-url origin 2>/dev/null || true)
-    case "$origin_url" in
-        *github.com*) pr_host=gh ;;
-        *) pr_host=az ;;
-    esac
-fi
-
-case "$pr_host" in
-    gh) command -v gh >/dev/null 2>&1 || { echo "ERROR: pr_host=gh but the gh CLI is not installed." >&2; exit 1; } ;;
-    az) command -v az >/dev/null 2>&1 || { echo "ERROR: pr_host=az but the az CLI is not installed." >&2; exit 1; } ;;
-    *) echo "ERROR: unknown pr_host '$pr_host' in .codereviewrc (gh | az)." >&2; exit 1 ;;
-esac
 
 pr_merge_method=$(rc_get pr_merge_method)
 pr_merge_method=${pr_merge_method:-squash}
