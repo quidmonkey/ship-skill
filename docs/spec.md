@@ -122,7 +122,7 @@ At the `merge` stage and above, the PR is approved and auto-completed right away
 ### 5. merge
 
 1. Approve (`gh pr review --approve` or `az repos pr set-vote --vote approve`). If approval fails, log a warning and keep going.
-2. Arm auto-merge or auto-complete: squash, and delete the source branch.
+2. Arm auto-merge or auto-complete: squash, and delete the source branch. When the branch has decision trailers, the squash commit message is set explicitly so they survive ([decision-trailers.md](decision-trailers.md)).
 3. Poll every `pr_poll_interval` seconds, up to `pr_poll_timeout`. While waiting, record the blocking reason from the host (failing policy, required check) in `status.json` so `/ship status` shows it.
 4. When the PR merges, record the merge commit. On ADO that's `lastMergeCommit.commitId`, and on GitHub `mergeCommit.oid`.
 5. Run `git fetch origin develop`. This only updates remote refs. The developer's checkout, current branch and local branches are never touched. The final message suggests `git branch -d <branch>` if the developer is done with it.

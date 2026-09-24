@@ -11,6 +11,8 @@ description: |
 
 `scripts/ship.sh` does the work in its own git worktree, so the developer keeps editing while it runs. This skill plans the ship, starts it, and relays its progress. `README.md` ("Shipping") documents the stages and settings.
 
+Decision trailers on the branch's commits (`README.md`, "Decision history") are copied into the PR description, and into the squash commit message when the merge stage squashes, so they survive the merge. `scripts/ship.sh` does this; nothing in this skill needs to.
+
 | Invocation | Does |
 |---|---|
 | `/ship [stage] [key=value ...]` | Plan, confirm through the permission prompt, start, and report each stage |

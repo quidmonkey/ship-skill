@@ -577,12 +577,22 @@ stage_push() {
 }
 
 pr_body() {
+    local decisions
     echo "Shipped from \`$source_branch\` at $(printf '%s' "$snapshot_sha" | cut -c1-7) by /ship ($ship_id)."
     echo ""
     echo "## Commits"
     echo ""
     git log --reverse --format='- %s' "origin/$ship_base..HEAD"
     echo ""
+    decisions=$(bash "$script_dir/decisions.sh" --range "origin/$ship_base..HEAD")
+    if [ -n "$decisions" ]; then
+        echo "## Decisions"
+        echo ""
+        echo '```'
+        echo "$decisions"
+        echo '```'
+        echo ""
+    fi
     echo "## Code review"
     echo ""
     if [ -f "$ship_dir/code-review-report.md" ]; then
@@ -679,8 +689,22 @@ pr_poll() {
     esac
 }
 
+# squash_body — the squash commit's body when the branch recorded decisions:
+# the commit list, then every Decision/Rejected trailer as the final paragraph,
+# where scripts/decisions.sh reads them. Empty when there are none, which
+# leaves the host's default message. Without this a squash merge drops them.
+squash_body() {
+    local trailers
+    trailers=$(bash "$script_dir/decisions.sh" --trailers --range "origin/$ship_base..HEAD")
+    [ -n "$trailers" ] || return 0
+    git log --reverse --format='* %s' "origin/$ship_base..HEAD"
+    echo ""
+    echo "$trailers"
+}
+
 stage_merge() {
-    local method_flag elapsed=0 last_blocking="" squash=true
+    local method_flag elapsed=0 last_blocking="" squash=true body=""
+    local body_args=()
     cur_stage=merge
     pr_url=$(status_get "$ship_dir/status.json" pr_url)
     pr_id=$(status_get "$ship_dir/status.json" pr_id)
@@ -692,7 +716,9 @@ stage_merge() {
                     || echo "WARNING: self-approval was rejected (branch protection?); auto-merge waits for a human review instead."
             fi
             method_flag="--$cfg_pr_merge_method"
-            gh pr merge "$pr_url" --auto "$method_flag" --delete-branch \
+            [ "$cfg_pr_merge_method" = squash ] && body=$(squash_body)
+            [ -n "$body" ] && body_args=(--body "$body")
+            gh pr merge "$pr_url" --auto "$method_flag" --delete-branch ${body_args[@]+"${body_args[@]}"} \
                 || fail_stage merge "couldn't arm auto-merge on $pr_url; it's open, merge it manually"
             ;;
         az)
@@ -701,8 +727,12 @@ stage_merge() {
                     || echo "WARNING: self-approval was rejected (branch policy?); auto-complete waits for a human review instead."
             fi
             [ "$cfg_pr_merge_method" = squash ] || squash=false
+            $squash && body=$(squash_body)
+            [ -n "$body" ] && body_args=(--merge-commit-message "Merged PR $pr_id: $source_branch
+
+$body")
             az repos pr update --id "$pr_id" --auto-complete true --squash "$squash" \
-                --delete-source-branch true >/dev/null \
+                --delete-source-branch true ${body_args[@]+"${body_args[@]}"} >/dev/null \
                 || fail_stage merge "couldn't arm auto-complete on PR $pr_id; it's open, complete it manually"
             ;;
     esac
