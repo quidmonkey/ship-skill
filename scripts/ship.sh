@@ -733,8 +733,10 @@ review_blocked() {
 stage_push() {
     local attempt=0 retries=$cfg_ship_fix_retries msg p keep_out=()
     cur_stage=push
+    # git add -A already skips ignored paths, and naming one in an exclude
+    # pathspec makes it warn and exit 1, so only unignored ones are named.
     for p in $ship_local_paths; do
-        keep_out+=(":(exclude)$p")
+        git check-ignore -q -- "$p" || keep_out+=(":(exclude)$p")
     done
     ship_event "$ship_dir" push running "reviewing and pushing $snapshot (the review can take several minutes)"
     while :; do
@@ -749,7 +751,7 @@ stage_push() {
         fi
         copy_report
         if [ -f "$autofix_marker" ] && [ "$attempt" -lt "$retries" ]; then
-            git add -A -- . "${keep_out[@]}"
+            git add -A -- . ${keep_out[@]+"${keep_out[@]}"}
             if ! git commit -q -m "Apply code review auto-fix" \
                 -m "Auto-fix resolved the REQUIRED findings from the pre-push code review."; then
                 fail_stage push "the auto-fix left nothing to commit; see $ship_dir/code-review-report.md"

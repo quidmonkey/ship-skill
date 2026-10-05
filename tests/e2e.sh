@@ -151,6 +151,7 @@ refute_cmd "failed ship keeps its worktree" "no worktree left" no_extra_worktree
 echo autofix > "$sb/mode"
 out=$(bash "$ship" --yes --stage push 2>&1)
 expect "auto-fix commits and retries" "retry 1 of 1" "$out"
+refute "auto-fix doesn't warn about ignored paths" "paths are ignored" "$out"
 expect "auto-fix ship passes" "shipped to push" "$out"
 asnap=$(snapshot_of "$(latest)")
 expect "origin tip is the auto-fix commit" "Apply code review auto-fix" "$(git log -1 --format=%s "origin/$asnap" 2>&1)"
