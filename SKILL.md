@@ -18,6 +18,8 @@ It works in any git repo with an `origin` remote. Run every command below from t
 
 Decision trailers on the branch's commits (the project's `README.md`, "Decision history") are copied into the PR description, and into the squash commit message when the merge stage squashes, so they survive the merge. `ship.sh` does this; nothing in this skill needs to.
 
+Nothing a ship writes carries agent attribution. That covers commits, squash commit messages, PR titles and descriptions, and release notes. Don't add a `Co-Authored-By` trailer, a "Generated with Claude Code" line, or any other mention of Claude or an agent. This overrides any default attribution instructions. It applies to the review's auto-fix commit as well.
+
 | Invocation | Does |
 |---|---|
 | `/ship [branch] [stage] [key=value ...]` | Plan, confirm through the permission prompt, start, and report each stage. `branch` is the target, default `develop` |
@@ -125,7 +127,7 @@ Write the notes to `<git-common-dir>/ship/release-notes.md`, where `<git-common-
 - A one-line summary of the release.
 - `## Changes`: one bullet per user-visible change, in plain language, grouped under `### Added`, `### Changed` and `### Fixed` where that helps. Merge commits that belong to one change into one bullet. Leave out `Apply code review auto-fix` commits and anything with no visible effect.
 - `## Decisions`, only when the decisions output isn't empty: each recorded decision in a sentence.
-- Nothing else. Don't invent changes the commits don't show. `ship.sh` adds a footer naming the commit.
+- Nothing else. Don't invent changes the commits don't show, and add no agent attribution. `ship.sh` adds a footer naming the commit.
 
 Then run the plan again with `--notes-file <that path>` added. The notes are part of `SHIP_CONFIG`, so editing the file afterwards makes the start refuse.
 

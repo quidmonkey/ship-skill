@@ -38,6 +38,7 @@ The new design moves all of it into a separate git worktree, so none of it touch
 - Deploy tagging with the commit SHA is optional. It becomes a scaffold question, and verification falls back to timing checks when tags aren't there.
 - Each ship has its own log directory. Directories are pruned 30 days after the ship finishes.
 - Scaffolded projects use `develop` as the default branch.
+- Commits, squash messages, PR descriptions and release notes from a ship carry no agent attribution: no `Co-Authored-By` trailer and no "Generated with" line.
 - Only `.codereviewrc` is copied into the worktree. There's no setting for copying other gitignored files.
 - Repos the scaffold didn't create get the ship pipeline through a documented manual install.
 - Writes to the review ledger are locked, and a branch and commit can't be shipped twice at the same time.
