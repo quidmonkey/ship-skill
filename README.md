@@ -34,12 +34,31 @@ A git repo with an `origin` remote, a feature branch checked out, and an `origin
 
 Where the review comes from depends on the repo:
 
-- **Any repo.** `ship.sh` runs this skill's `scripts/code-review.sh` in the ship worktree before each push. The push then runs the repo's own hooks, if it has any. The review reads `CLAUDE.md` and `docs/` when they exist and works without them.
+- **Any repo.** `ship.sh` runs this skill's `scripts/code-review.sh` in the ship worktree before each push. The push then runs the repo's own hooks, if it has any. The review reads `CLAUDE.md` when there is one, and checks changes against the repo's documents, wherever they live (see [Documents and source of truth](#documents-and-source-of-truth)). It works with no documents at all.
 - **A repo the scaffold skill created.** Its `scripts/lib/common.sh` sets `ship_contract`, and its pre-push hook runs its own `scripts/code-review.sh` on every push, so `ship.sh` relies on the hook and doesn't review twice. The `ship_contract` value has to match the one in `scripts/lib/ship-config.sh`. A mismatch stops the ship with a message saying which side to update. A `scripts/lib/common.sh` without `ship_contract` is treated as unrelated, and the skill's review runs.
 
 The decision trailers in the PR description come from the repo's `scripts/decisions.sh` when it has one, and from this skill's copy otherwise.
 
-`ship.sh` writes review reports to `working/` and personal settings to `.codereviewrc`. When the repo doesn't already ignore or track them, it adds both to `.git/info/exclude`, which stays local and is never committed. The auto-fix commit leaves both out either way, so a tracked `.codereviewrc` with personal edits isn't pushed.
+`ship.sh` writes review reports to files under `working/` and personal settings to `.codereviewrc`. When the repo doesn't already ignore or track them, it adds those files to `.git/info/exclude`, which stays local and is never committed. It names the report files rather than all of `working/`, so a repo that keeps its own files in `working/` still commits fixes to them. The auto-fix commit leaves the reports and `.codereviewrc` out either way, so a tracked `.codereviewrc` with personal edits isn't pushed.
+
+### Documents and source of truth
+
+The skill's review ranks its sources: the repo's documents first, then tests, then code. Documents state intended behavior. Tests encode it where the documents say nothing. Code only shows what happens now. A repo with no documents gets tests over code. If `CLAUDE.md` sets a different order, the review follows `CLAUDE.md`.
+
+Which files count as documents is set by `review_docs`:
+
+- `auto`, the default, takes whichever of `docs`, `doc`, `ARCHITECTURE.md`, `DESIGN.md` and `README.md` the commit has.
+- A space-separated list names them, for example `review_docs=specs/ ADR.md`. The plan warns about any path the commit doesn't have.
+- `none` says the repo has no such documents.
+
+The plan's `docs` line shows what was found, and the review report lists it too. The order changes what the review does in four ways:
+
+- The review flags tests weakened, skipped or deleted to make changed code pass.
+- It asks for a doc update only when a change makes a documented statement wrong. With no documents, missing documentation is never a finding.
+- The fixer fixes the code, not the test, unless a document shows the test is wrong.
+- The verifier rejects a fix that only edits a test.
+
+A scaffolded repo's own review reads `docs/` and gets the same order from the scaffold's `CLAUDE.md`.
 
 Two settings depend on the repo's language. `ship_setup` is the command run in a new worktree before the review; it defaults to `uv sync -q` when there's a `pyproject.toml`, and to nothing otherwise. `fix_checks` lists the lint and test commands the review's fixer runs to check its work; it defaults to `uv run pre-commit;uv run pytest` with a `pyproject.toml`, and to none otherwise. For a Node repo, for example:
 
@@ -130,6 +149,7 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 | `ship_stage` | `push`, `open_pr`, `merge`, `verify_deploy` | `open_pr` |
 | `ship_setup` | command run in a new worktree before the review | `uv sync -q` with a `pyproject.toml`, else none |
 | `fix_checks` | `;`-separated lint and test commands the fixer runs (skill review only) | `uv run pre-commit;uv run pytest` with a `pyproject.toml`, else none |
+| `review_docs` | `auto`, `none`, or space-separated paths of the documents the review checks against (skill review only) | `auto` |
 | `ship_fix_retries` | times one ship commits an auto-fix and pushes again | `1` |
 | `ship_log_retention_days` | days to keep finished ship logs; `0` keeps them | `30` |
 | `ship_notify` | `none`, `desktop` (desktop notification on macOS, Windows or Linux when a ship passes, fails or stops) | `none` |
@@ -160,7 +180,8 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 | `SKILL.md` | The `/ship` skill |
 | `scripts/ship.sh` | Plans and runs one ship |
 | `scripts/lib/ship-config.sh` | Picks the project's review tooling or this skill's, checks `ship_contract`, adds the ship keys and defaults |
-| `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` | The review, decision trailers and shared helpers, used in repos without their own. Copies of the scaffold skill's templates, with `fix_checks` added |
+| `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` | The review, decision trailers and shared helpers, used in repos without their own. Copies of the scaffold skill's templates, with `fix_checks` added and documents found by `review_docs` |
+| `scripts/lib/review-docs.sh` | Finds the documents the skill's review checks against |
 | `scripts/lib/ship-status.sh`, `scripts/lib/ship-deploy.sh` | Status and event helpers; deploy verification |
 | `scripts/set-ship-stage.sh` | Writes `ship_stage` into the project's `.codereviewrc` |
 | `ship.mk` | The `make ship*` targets a project includes |

@@ -3,10 +3,13 @@
 # skill's templates/scripts/code-review.sh: ship.sh runs it in the ship
 # worktree before each push, in a repo without its own review tooling (see
 # lib/ship-config.sh). A scaffolded repo runs its copy as the pre-push hook.
+# Unlike the template, it doesn't assume the scaffold's docs/ layout: it finds
+# the project's documents itself (review_docs), and works with none.
 #   Pass 1: general review — correctness, security, missing tests, DRY,
 #           YAGNI, library leverage, fit with the codebase.
-#   Pass 2: spec conformance against the documents in docs/ and the
-#           decisions recorded in commit trailers (scripts/decisions.sh).
+#   Pass 2: conformance to the project's documents and the decisions
+#           recorded in commit trailers (scripts/decisions.sh).
+# Every pass ranks its sources: documents > tests > code.
 # The passes are independent and run in parallel.
 #
 # Commits are reviewed once: the last passing commit per branch is recorded in
@@ -23,7 +26,7 @@
 # Config: .codereviewrc (key=value) — review_agent, review_model,
 #         review_effort, review_spec_model, review_spec_effort, enabled,
 #         command, fix_enabled, fix_agent, fix_model, fix_effort, fix_command,
-#         fix_checks, agent_timeout. Any key can be
+#         fix_checks, agent_timeout, review_docs. Any key can be
 #         overridden for one push with CR_<KEY>, e.g. CR_REVIEW_MODEL=sonnet.
 # Skip:   SKIP_CODE_REVIEW=true git push, or enabled=false in .codereviewrc.
 # Base:   REVIEW_BASE_BRANCH replaces the default branch as a branch's
@@ -37,6 +40,8 @@ set -u
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib/common.sh
 source "$script_dir/lib/common.sh"
+# shellcheck source=lib/review-docs.sh
+source "$script_dir/lib/review-docs.sh"
 
 rc_file=".codereviewrc"
 report="working/code-review-report.md"
@@ -83,6 +88,10 @@ fix_max_iterations=$(rc_value fix_max_iterations)
 fix_checks=$(rc_value fix_checks)
 # Seconds any one agent call may run before it's killed and counted as failed.
 agent_timeout=$(rc_value agent_timeout)
+# The files and directories that state the project's intended behavior,
+# space-separated: auto (the default) looks in the usual places, none means
+# the project has no such documents.
+review_docs=$(rc_value review_docs)
 
 if [ "$enabled" = "false" ]; then
     echo "Code review disabled in $rc_file — skipping."
@@ -292,6 +301,11 @@ fi
 
 # --- review passes -----------------------------------------------------------
 
+# doc_sources: the documents that state intended behavior (lib/review-docs.sh).
+review_doc_sources "$review_docs" "$head_sha"
+[ -n "$doc_missing" ] && echo "WARNING: review_docs names paths that aren't in the commit, left out:$doc_missing" >&2
+echo "Documents of intended behavior: $(review_docs_summary)"
+
 mkdir -p working
 # Cleared unconditionally so a stale marker from an earlier, unrelated blocked
 # push can never be mistaken for this run's outcome — see common.sh.
@@ -304,6 +318,7 @@ rm -f "$autofix_marker"
     echo "- Review agent: \`$review_agent\`"
     [ "$review_agent" = "claude" ] && echo "- Models: pass 1 \`$review_model\` (effort \`$review_effort\`), pass 2 and verification \`$review_spec_model\` (effort \`$review_spec_effort\`), fix \`$fix_model\` (effort \`$fix_effort\`)"
     [ "$fix_enabled" = "true" ] && echo "- Fix agent: \`$fix_agent\`"
+    echo "- Documents: $(review_docs_summary)"
     echo "- Date: $(date '+%Y-%m-%d %H:%M:%S')"
 } > "$report"
 
@@ -357,6 +372,53 @@ show_pass() {
 findings_file="working/code-review-findings.md"
 fix_summary_file="working/code-review-fix-summary.md"
 
+# --- documented intent ---------------------------------------------------------
+# $authority tells every agent which documents state intended behavior and how
+# they rank against tests and code.
+
+if [ "${#doc_sources[@]}" -gt 0 ]; then
+    doc_list=$(printf -- '- %s\n' "${doc_sources[@]}")
+    read -r -d '' authority <<EOF || true
+These documents state this project's intended behavior:
+$doc_list
+
+Source of truth, highest authority first: those documents > tests > code. The
+documents state intended behavior; tests encode it where the documents are
+silent; code only describes what happens now. Resolve a conflict by climbing to
+the highest level that speaks to it. If CLAUDE.md sets a different order,
+follow CLAUDE.md.
+EOF
+    read -r -d '' spec_scope <<'EOF' || true
+Read the documents that bear on the change. Start with any design or
+architecture overview among them (for example docs/design.md or
+ARCHITECTURE.md). If they hold per-flow specs (for example docs/specs/), read
+the ones covering the flows this change touches; each is the source of truth
+for its own flow.
+
+Check that the changed code conforms to the intent the documents lay out:
+- Architecture and component boundaries match the documented design
+- Behavior matches what the documents specify for the flows it touches
+- Data flow and integration points match the documented design
+- Nothing contradicts documented decisions or constraints
+- A test changed in the range still matches the documents: a test rewritten to
+  fit new behavior the documents don't call for lets the code overrule them
+- If the change alters design, architecture, or public API that the documents
+  describe, they were updated in the same change
+EOF
+else
+    read -r -d '' authority <<EOF || true
+This project has no documents stating its intended behavior ($no_docs_reason).
+Source of truth, highest authority first: tests > code. Tests encode intended
+behavior; code only describes what happens now. If CLAUDE.md sets a different
+order, follow CLAUDE.md.
+EOF
+    read -r -d '' spec_scope <<'EOF' || true
+There are no documents to check the code against, so check only the recorded
+decisions below. Missing documentation is not a finding: don't ask for new
+documents.
+EOF
+fi
+
 # The REQUIRED bar for code findings, shared by pass 1 and the fix verification
 # so a fix is judged by the same standard as the code it fixes.
 read -r -d '' required_bar <<'EOF' || true
@@ -408,12 +470,15 @@ You are performing pass 1 of 2 of a pre-push code review for this repository.
 
 Scope: the changes in git range $range. Start with:
     git diff $range
-Read surrounding source files as needed for context, and read CLAUDE.md for
-this project's coding and testing guidelines.
+Read surrounding source files as needed for context, and read CLAUDE.md, if
+there is one, for this project's coding and testing guidelines.
+
+$authority
 
 Review the changes for, in priority order:
 - Correctness: logic errors, wrong conditions or boundaries, unhandled None or
-  empty inputs, broken error handling, race conditions, callers the change breaks
+  empty inputs, broken error handling, race conditions, callers the change breaks,
+  and tests weakened, skipped, or deleted to make changed code pass
 - Security (injection, secrets in code, unsafe deserialization, path traversal, etc.)
 - Missing tests: gaps per the testing guidance in CLAUDE.md (critical flows and core logic need tests; handlers and unexpected paths do not)
 - DRY: duplicated logic that should be extracted or should reuse an existing function
@@ -436,41 +501,35 @@ EOF
 
     read -r -d '' p2 <<EOF || true
 You are performing pass 2 of 2 of a pre-push code review for this repository:
-spec conformance.
+conformance to documented intent.
 
 Scope: the changes in git range $range. Start with:
     git diff $range
-Then read docs/design.md. If docs/specs/ holds per-flow specs, read the ones
-covering the flows this change touches (design.md's Flows index maps them);
-each is the source of truth for its own flow. Read any other document in docs/
-that bears on the change.
 
-Check that the changed code conforms to the intent laid out in the specs:
-- Architecture and component boundaries match docs/design.md
-- Per-flow behavior matches the flow's spec under docs/specs/
-- Data flow and integration points match the documented design
-- Nothing contradicts documented decisions or constraints
+$authority
+
+$spec_scope
 - Nothing reverses a recorded decision below, or brings back an alternative it
   rejected, unless a commit in $range records a new Decision trailer that
   supersedes it
-- If the change alters design, architecture, or public API, the docs were updated in the same change
 
-Decisions recorded in commit trailers on the changed paths, newest first
-(README.md, "Decision history"). Entries from commits inside $range are this
-change's own. When a recorded decision and docs/ disagree, docs/ wins.
+Decisions recorded in commit trailers on the changed paths, newest first.
+Entries from commits inside $range are this change's own. When a recorded
+decision and the documents disagree, the documents win.
 
 $decisions
 
-Where the specs are silent on an area, that is not a finding. Only deviations
-from documented intent count.
+Where the documents are silent on an area, that is not a finding. Only
+deviations from documented intent count.
 
 Report every finding as a markdown bullet:
 - **REQUIRED** or **SUGGESTED** — \`file:line\` (or doc section) — the spec statement, the deviation, and what change is needed
 
 REQUIRED is limited to code that directly contradicts a documented statement,
 code that reverses a recorded decision with no superseding Decision trailer in
-the range, or a design, architecture, or public API change with no matching
-doc update. Quote the statement or the trailer and its commit. Anything weaker, or resting on your reading of intent
+the range, or a design, architecture, or public API change that leaves a
+statement in the documents wrong. A change the documents don't describe needs
+no doc update. Quote the statement or the trailer and its commit. Anything weaker, or resting on your reading of intent
 rather than on what the doc says, is SUGGESTED.
 If there are no findings, say so.
 
@@ -535,7 +594,10 @@ You are the fix pass of a pre-push code review for this repository.
 
 A code review of these changes failed. Read the findings in:
     $findings_file
-and read CLAUDE.md for this project's coding and testing guidelines.
+and read CLAUDE.md, if there is one, for this project's coding and testing
+guidelines.
+
+$authority
 
 Handle every finding marked REQUIRED or OPEN. Ignore SUGGESTED, RESOLVED, and
 DISPUTE ACCEPTED findings.
@@ -543,14 +605,18 @@ DISPUTE ACCEPTED findings.
 Check each finding against the code before acting on it. Then either:
 - fix it, or
 - dispute it, when it is wrong: its failure scenario can't happen, or the
-  behavior it flags is what docs/ specifies. A dispute needs evidence another
-  reviewer can check: a file:line, a quoted doc statement, or test output.
+  behavior it flags is what the highest source that speaks to it specifies.
+  A dispute needs evidence another reviewer can check: a file:line, a quoted
+  doc statement, or test output.
   Change no code for a disputed finding. Don't dispute a finding just because
   the fix is hard.
 
 Rules:
 - Fix at the root cause. If several findings share one root cause, fix it once.
 - Make the minimal, localized change that resolves each finding.
+- When a test fails, fix the code, not the test, unless a higher source shows
+  the test is wrong; then quote that statement in the summary. Never weaken,
+  skip, or delete a test only to make a check pass.
 - Edit files in the working tree. Do NOT stage, commit, amend, or push — leave
   all changes uncommitted for human review.
 $verify_rule
@@ -606,13 +672,16 @@ The fixes are uncommitted. See them with:
     git diff HEAD
     git status --porcelain
 and read any new untracked files; they are part of the fix. Read surrounding
-source, CLAUDE.md, and docs/ as needed.
+source, CLAUDE.md, and the documents named below as needed.
+
+$authority
 
 Judge each REQUIRED or OPEN finding from the findings file:
 - RESOLVED: the fix removes the failure scenario, or makes the code match the doc.
 - DISPUTE ACCEPTED: the fix agent disputed it, and its evidence holds up when
   you check it yourself. The finding was wrong.
-- OPEN: not fixed, fixed incompletely, or disputed without evidence that holds up.
+- OPEN: not fixed, fixed incompletely, disputed without evidence that holds up,
+  or "fixed" by changing a test that no higher source shows was wrong.
 
 Then review the fix diff (git diff HEAD plus new untracked files, not the rest
 of the branch) for problems the fix itself introduces. $required_bar

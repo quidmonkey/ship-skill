@@ -458,6 +458,9 @@ preflight_feature() {
 
     if [ "$review_tooling" = skill ]; then
         pf_ok "review: the ship skill's code-review.sh runs before the push"
+        review_doc_sources "$cfg_review_docs" "$head_sha"
+        [ -n "$doc_missing" ] \
+            && pf_warn "review_docs names paths that aren't in $sha7, so the review leaves them out:$doc_missing"
     else
         hook=$(git rev-parse --git-path hooks/pre-push)
         if [ -f "$hook" ]; then
@@ -607,7 +610,8 @@ print_block() {
     local key shown
     shown="ship_stage ship_setup pr_host pr_merge_method pr_self_approve pr_reviewers review_agent
 review_model review_effort review_spec_model review_spec_effort fix_enabled
-fix_model fix_effort fix_max_iterations $(in_list fix_checks "$rc_known_keys" && echo fix_checks) ship_fix_retries agent_timeout pr_poll_interval pr_poll_timeout"
+fix_model fix_effort fix_max_iterations $(in_list fix_checks "$rc_known_keys" && echo fix_checks)
+$([ "$review_tooling" = skill ] && echo review_docs) ship_fix_retries agent_timeout pr_poll_interval pr_poll_timeout"
     stage_at_least verify_deploy \
         && shown="$shown deploy_pipeline deploy_provider deploy_project deploy_region deploy_name
 deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout deploy_smoke_timeout"
@@ -623,6 +627,7 @@ deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout depl
         printf '  %-24s %s\n' target "$ship_base"
         if [ "$review_tooling" = skill ]; then
             printf '  %-24s %s\n' review "the ship skill's code-review.sh"
+            printf '  %-24s %s\n' docs "$(review_docs_summary) ← review_docs=$cfg_review_docs"
         else
             printf '  %-24s %s\n' review "the project's pre-push hook"
         fi

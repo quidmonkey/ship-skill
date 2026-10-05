@@ -37,12 +37,16 @@ else
     source "$skill_scripts/lib/common.sh"
 fi
 review_sh="$skill_scripts/code-review.sh"
+# shellcheck source=review-docs.sh
+source "$skill_scripts/lib/review-docs.sh"
 decisions_sh="$project_root/scripts/decisions.sh"
 [ -f "$decisions_sh" ] || decisions_sh="$skill_scripts/decisions.sh"
 
 # ship_local_paths — paths a ship writes that must never be committed: the
-# review's reports and personal settings.
-ship_local_paths="working .codereviewrc"
+# review's reports and personal settings. Files rather than all of working/,
+# so a repo that tracks its own working/ keeps committing it.
+ship_local_paths="working/code-review-report.md working/code-review-findings.md
+working/code-review-fix-summary.md $autofix_marker .codereviewrc"
 
 # ship_exclude_local — adds each of ship_local_paths to the repo's local
 # excludes (.git/info/exclude, never committed) unless it's already ignored,
@@ -64,7 +68,7 @@ ship_exclude_local() {
 # changes it), and the branch a prod ship (--target main or master) releases.
 ship_base=develop
 
-rc_known_keys="$rc_known_keys ship_stage ship_setup ship_fix_retries ship_log_retention_days
+rc_known_keys="$rc_known_keys review_docs ship_stage ship_setup ship_fix_retries ship_log_retention_days
 ship_notify pr_host pr_merge_method pr_self_approve pr_poll_interval
 pr_poll_timeout pr_reviewers deploy_pipeline deploy_provider deploy_project
 deploy_region deploy_name deploy_match deploy_proxy deploy_smoke
@@ -75,6 +79,8 @@ deploy_run_grace deploy_poll_timeout deploy_smoke_timeout"
 rc_default_extra() {
     case "$1" in
         ship_stage) echo open_pr ;;
+        # The skill's review finds the project's documents (lib/review-docs.sh).
+        review_docs) echo auto ;;
         # Run in a new worktree before the push, so the review's fixer and the
         # repo's hooks have its dependencies.
         ship_setup) [ -f pyproject.toml ] && echo 'uv sync -q' ;;

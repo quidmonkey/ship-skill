@@ -47,9 +47,11 @@ latest() { readlink .git/ship/latest; }
 snapshot_of() { sed -n 's/.*"snapshot_branch": *"\([^"]*\)".*/\1/p' ".git/ship/$1/status.json"; }
 
 # The review stub: verification passes; otherwise the verdict comes from the
-# mode, and "autofix" passes once the fix stub has run.
+# mode, and "autofix" passes once the fix stub has run. Both stubs append the
+# prompts they get to $sb/prompts.
 cat > "$sb/review.sh" <<EOF
 prompt=\$(cat)
+printf '%s\n' "\$prompt" >> "$sb/prompts"
 case "\$prompt" in *"verifying the fix pass"*) echo "- RESOLVED"; echo "VERDICT: PASS"; exit 0 ;; esac
 mode=\$(cat "$sb/mode")
 if [ "\$mode" = pass ] || { [ "\$mode" = autofix ] && grep -q fixed app.txt; }; then
@@ -58,9 +60,10 @@ else
     echo "- **REQUIRED** — app.txt:1 — broken, fails on every input"; echo "VERDICT: FAIL"
 fi
 EOF
-cat > "$sb/fix.sh" <<'EOF'
-cat > /dev/null
+cat > "$sb/fix.sh" <<EOF
+cat >> "$sb/prompts"
 echo fixed >> app.txt
+[ -f working/notes.md ] && echo fixed >> working/notes.md
 echo "Fix summary"; echo "FIXED app.txt:1"
 EOF
 
@@ -100,6 +103,7 @@ expect "plan names the skill's review" "review: the ship skill's code-review.sh"
 expect "no ship_setup without pyproject.toml" "ship_setup +\(none\)" "$out"
 refute "uv isn't required" "uv isn't on PATH" "$out"
 expect "fix_checks is shown" "fix_checks" "$out"
+expect "plan shows no docs found" "docs +\(none: none of docs doc ARCHITECTURE.md DESIGN.md README.md exists\) ← review_docs=auto" "$out"
 assert "plan creates no worktree" "$(git worktree list)" no_extra_worktrees
 
 out=$(bash "$ship" --plan --stage push --sets 'review_modle=sonnet' 2>&1)
@@ -121,6 +125,11 @@ out=$(bash "$ship" --yes --id "$id" --expect-sha "$sha" --expect-config "$cfg" -
 rc=$?
 expect "passing ship ships to push" "shipped to push" "$out"
 expect "the review ran" "Code review PASSED" "$out"
+expect "the review prints its documents" "Documents of intended behavior: \(none" "$out"
+prompts=$(cat "$sb/prompts")
+expect "no docs: tests outrank code" "highest authority first: tests > code" "$prompts"
+expect "no docs: missing docs aren't a finding" "Missing documentation is not a finding" "$prompts"
+refute "no docs: docs/design.md isn't assumed" "docs/design.md\\. If" "$prompts"
 assert "passing ship exits 0 (rc=$rc)" "$out" [ "$rc" -eq 0 ]
 snap="ship/feature/x-${sha:0:7}"
 assert "origin has $snap" "$(git ls-remote origin)" on_origin "$snap"
@@ -128,7 +137,8 @@ assert "passed ship removes its worktree" "$(git worktree list)" no_extra_worktr
 assert "checkout is still feature/x" "$(git status)" [ "$(git symbolic-ref --short HEAD)" = feature/x ]
 assert "checkout is clean" "$(git status)" [ -z "$(git status --porcelain)" ]
 excl=$(cat .git/info/exclude)
-expect "working/ excluded locally" "^working$" "$excl"
+expect "the review report is excluded locally" "^working/code-review-report.md$" "$excl"
+refute "working/ itself isn't excluded" "^working/?$" "$excl"
 expect ".codereviewrc excluded locally" "^\.codereviewrc$" "$excl"
 assert "report copied to the ship dir" "$(ls ".git/ship/$id")" [ -f ".git/ship/$id/code-review-report.md" ]
 out=$(bash "$ship" --status 2>&1)
@@ -196,6 +206,49 @@ refute ".codereviewrc stays out of git status" "codereviewrc" "$(git status --po
 bash "$skill/scripts/set-ship-stage.sh" push > /dev/null 2>&1
 assert "exclude lines aren't duplicated" "$(cat .git/info/exclude)" \
     [ "$(grep -cxF .codereviewrc .git/info/exclude)" = 1 ]
+
+# --- a documented repo: the review finds docs/ and README.md ----------------------
+
+echo "== documented repo"
+new_repo documented
+mkdir -p docs
+echo "App appends lines." > docs/design.md
+echo "# App" > README.md
+git add -A
+git commit -qm "Add docs"
+out=$(bash "$ship" --plan --stage push 2>&1)
+expect "plan shows the docs found" "docs +docs, README.md ← review_docs=auto" "$out"
+expect "plan lists review_docs" "review_docs +auto" "$out"
+out=$(bash "$ship" --plan --stage push --sets 'review_docs=docs/ spec/missing.md' 2>&1)
+expect "named review_docs are shown" "docs +docs ← review_docs=docs/ spec/missing.md" "$out"
+expect "a missing review_docs path warns" "leaves them out: spec/missing.md" "$out"
+out=$(bash "$ship" --plan --stage push --sets 'review_docs=none' 2>&1)
+expect "review_docs=none shows no docs" "docs +\(none: review_docs=none\)" "$out"
+: > "$sb/prompts"
+echo autofix > "$sb/mode"
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "documented ship passes" "shipped to push" "$out"
+prompts=$(cat "$sb/prompts")
+expect "prompts list the docs" "^- docs$" "$prompts"
+expect "docs outrank tests and code" "those documents > tests > code" "$prompts"
+expect "the fixer fixes code, not tests" "fix the code, not the test" "$prompts"
+expect "the verifier rejects test-only fixes" "by changing a test that no higher source" "$prompts"
+expect "the report names the docs" "Documents: docs, README.md" "$(cat ".git/ship/$(latest)/code-review-report.md")"
+
+# --- a repo that tracks its own working/: fixes there are committed ----------------
+
+echo "== tracked working/"
+new_repo trackedwork
+mkdir -p working
+echo notes > working/notes.md
+git add working
+git commit -qm "Track working notes"
+echo autofix > "$sb/mode"
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "tracked-working ship passes" "shipped to push" "$out"
+files=$(git show --name-only --format= "origin/$(snapshot_of "$(latest)")")
+expect "auto-fix commit has the tracked working/ fix" "^working/notes.md$" "$files"
+refute "auto-fix commit leaves the review reports out" "code-review|autofix-pending" "$files"
 
 # --- a repo that tracks .codereviewrc: personal edits stay out of commits ---------
 

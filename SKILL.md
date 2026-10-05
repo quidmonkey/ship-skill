@@ -1,6 +1,6 @@
 ---
 name: ship
-version: 1.1.0
+version: 1.2.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and verify the dev deploy, as far as the

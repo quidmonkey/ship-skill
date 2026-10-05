@@ -31,6 +31,13 @@ ship_stage=open_pr
 # pyproject.toml, otherwise none. e.g. npm run lint;npm test
 # fix_checks=
 
+# Repos without their own review tooling only: the files and directories that
+# state the project's intended behavior, space-separated. The review checks
+# changes against them and ranks them above tests, and tests above code.
+# auto takes whichever of docs, doc, ARCHITECTURE.md, DESIGN.md and README.md
+# exist; none means the project has no such documents. e.g. specs/ ADR.md
+# review_docs=auto
+
 # Days to keep finished ship logs in .git/ship/; 0 keeps them forever.
 ship_log_retention_days=30
 

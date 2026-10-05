@@ -1,6 +1,6 @@
 # Spec: /ship skill and background ship pipeline
 
-Status: built in scaffold skill version 3.0.0, moved into this standalone skill (ship 1.0.0, scaffold 5.0.0), and made to work in any repo (ship 1.1.0). See [Packaging](#packaging) for the split. See [Implementation notes](#implementation-notes) for what the build added or settled. Deploy verification has been tested against stubbed `gh`, `gcloud` and `curl` only.
+Status: built in scaffold skill version 3.0.0, moved into this standalone skill (ship 1.0.0, scaffold 5.0.0), and made to work in any repo (ship 1.1.0). Ship 1.2.0 finds a repo's documents itself and ranks documents over tests over code in every review prompt (see [Documented intent](#documented-intent)). See [Packaging](#packaging) for the split. See [Implementation notes](#implementation-notes) for what the build added or settled. Deploy verification has been tested against stubbed `gh`, `gcloud` and `curl` only.
 
 ## Packaging
 
@@ -9,7 +9,7 @@ The ship skill lives at `~/.claude/skills/ship` and is its own git repo (`git@gi
 The review tooling comes from one of two places, and `lib/ship-config.sh` picks it when it's sourced:
 
 - **Project.** A scaffolded repo keeps the review half of the pipeline, written by the scaffold skill: `scripts/code-review.sh` (the pre-push hook), `scripts/decisions.sh` and `scripts/lib/common.sh`. `common.sh` is the contract between the two repos. The ship skill sources it from the project root and uses `rc_*`, `ledger_*`, `with_timeout` and `autofix_marker`. It carries `ship_contract=1`, and `lib/ship-config.sh` refuses to run against any other value. The pre-push hook is the review.
-- **Skill.** Any other repo, including one whose `scripts/lib/common.sh` has no `ship_contract` line. The skill sources its own `scripts/lib/common.sh` and runs its own `scripts/code-review.sh` in the worktree before each push. Both are copies of the scaffold skill's templates. The review copy adds `fix_checks`, the lint and test commands its fixer may run, in place of the template's fixed `uv run pytest`, `uv run pre-commit` and `make run-check`.
+- **Skill.** Any other repo, including one whose `scripts/lib/common.sh` has no `ship_contract` line. The skill sources its own `scripts/lib/common.sh` and runs its own `scripts/code-review.sh` in the worktree before each push. Both are copies of the scaffold skill's templates. The review copy adds `fix_checks`, the lint and test commands its fixer may run, in place of the template's fixed `uv run pytest`, `uv run pre-commit` and `make run-check`. It also finds the repo's documents instead of assuming the scaffold's `docs/` layout (see Documented intent).
 
 `scripts/decisions.sh` comes from the project when it has one and from the skill otherwise. The ship keys, their defaults (through the `rc_default_extra` hook in `rc_default`) and `ship_base` live in `lib/ship-config.sh`.
 
@@ -64,8 +64,9 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 |---|---|
 | `SKILL.md` (this skill) | The `/ship` skill: kickoff, status, stop, and stage notifications |
 | `scripts/ship.sh` (this skill) | Orchestrates one ship: plan, preflight, worktree, stages. `--plan` prints the config block and creates nothing. Runs in the foreground by default, or `--detach` for the background. `--status`, `--stop` and `--watch` wrap the status helpers |
-| `scripts/lib/ship-config.sh` (this skill) | Picks the project's tooling or the skill's (see Packaging), checks `ship_contract`, adds the ship keys and their defaults, sets `ship_base`, and adds `working/` and `.codereviewrc` to `.git/info/exclude` when nothing ignores them |
+| `scripts/lib/ship-config.sh` (this skill) | Picks the project's tooling or the skill's (see Packaging), checks `ship_contract`, adds the ship keys and their defaults, sets `ship_base`, and adds the review's report files under `working/` and `.codereviewrc` to `.git/info/exclude` when nothing ignores them |
 | `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` (this skill) | The review tooling for repos without their own |
+| `scripts/lib/review-docs.sh` (this skill) | Finds the documents of intended behavior for the skill's review and the plan's `docs` line (see Documented intent) |
 | `tests/e2e.sh` (this skill) | End-to-end checks up to the push stage in throwaway repos, with stubbed review and fix agents |
 | `scripts/lib/ship-status.sh` (this skill) | Status, event and log helpers, retention pruning, and the status, stop and watch commands |
 | `scripts/lib/ship-deploy.sh` (this skill) | Deploy verification: find the run, health check, smoke test |
@@ -86,7 +87,7 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 1. Read and validate `.codereviewrc`, and resolve the stage.
 2. Refuse to continue if HEAD is detached, if the current branch is `develop` or `main`, or if the branch has no commits ahead of `origin/develop`. Warn, but don't block, if there are uncommitted changes. They aren't part of the ship. Also refuse if a running ship already has the same source branch and HEAD SHA. A running ship is one with a live `pid` and no `finished_at`.
 3. Run preflight for the resolved stage (see Preflight).
-4. Generate the ship ID (`<yyyymmdd-hhmmss>-<sha7>`) and print the config block (see Status, events and logs). The block shows the exact snapshot branch and worktree path this ship will use. It also lists preflight results and warnings.
+4. Generate the ship ID (`<yyyymmdd-hhmmss>-<sha7>`) and print the config block (see Status, events and logs). The block shows the exact snapshot branch and worktree path this ship will use. With the skill's tooling it also shows the documents the review will check against, or why there are none. It also lists preflight results and warnings.
 
 **Reviewer question (skill only).** Before running the plan, `/ship` works out the stage using the normal precedence. If the stage is `open_pr` and the invocation didn't set `pr_reviewers`, the skill asks "Add reviewers to this PR?". The options are:
 
@@ -109,7 +110,7 @@ Then the developer confirms:
 5. Run `ship.sh --id <id> --expect-sha <sha> --expect-config <hash>` with the same overrides the plan had. The plan prints `<hash>`, a hash of every resolved setting. If HEAD has moved since the plan, any setting now resolves differently, or a check that passed in the plan now fails, refuse, and tell the developer to run `/ship` again. That way the developer never approves one config and gets another.
 6. Prune expired ship directories (see Retention).
 7. Create the snapshot branch `ship/<branch>-<sha7>` at HEAD, or `ship/<target>/<branch>-<sha7>` for a target other than `develop`, so one commit shipped to two targets gets two branches. Seed its ledger entry in `.git/code-review-ledger` from the source branch's entry, so commits already reviewed aren't reviewed again. The write takes the ledger lock (see Concurrency).
-8. Create the worktree at `../<repo>.ship-<id>` on the snapshot branch. Copy `.codereviewrc` into it, since the file is ignored. Create `working/`. Run `ship_setup` (`uv sync -q` by default when the repo has a `pyproject.toml`). Before the worktree is created, `working/` and `.codereviewrc` go into `.git/info/exclude` unless they're already ignored, listed or tracked. The auto-fix commit's `git add -A` skips them when they're ignored, and leaves out by pathspec any that aren't, such as a tracked `.codereviewrc`.
+8. Create the worktree at `../<repo>.ship-<id>` on the snapshot branch. Copy `.codereviewrc` into it, since the file is ignored. Create `working/`. Run `ship_setup` (`uv sync -q` by default when the repo has a `pyproject.toml`). Before the worktree is created, the review's files (`working/code-review-report.md`, `code-review-findings.md`, `code-review-fix-summary.md` and `autofix-pending.marker`) and `.codereviewrc` go into `.git/info/exclude` unless they're already ignored, listed or tracked. The list names files rather than `working/`, so a repo that tracks its own `working/` still commits fixes there. The auto-fix commit's `git add -A` skips them when they're ignored, and leaves out by pathspec any that aren't, such as a tracked `.codereviewrc`.
 9. Create `.git/ship/<id>/`. Write the config block to `status.json` and to the top of `ship.log`. Point `.git/ship/latest` at the new directory.
 10. With `--detach`: re-launch the rest under `nohup`, write `pid`, print the ship ID, and exit 0. Without it, continue in the foreground and stream `ship.log`.
 
@@ -280,6 +281,23 @@ The job keeps running if the session closes. When `ship_notify=desktop` is set, 
 
 `code-review.sh` bases a branch's first review on `origin/<default branch>`. Scaffolded projects default to `develop`, so that's already right for them. Repos installed by hand may still default to `main`, and there a PR into `develop` would be reviewed against the wrong base. `ship.sh` exports `REVIEW_BASE_BRANCH=develop`, and `code-review.sh` uses it in place of `default_branch()` in its merge-base fallback. Plain `git push` behavior doesn't change.
 
+## Documented intent
+
+The skill's `code-review.sh` doesn't assume the scaffold's `docs/` layout. `lib/review-docs.sh` picks the documents that state the repo's intended behavior from the shipped commit, so the plan and the review see the same set:
+
+- `review_docs=auto` (the default) takes whichever of `docs`, `doc`, `ARCHITECTURE.md`, `DESIGN.md` and `README.md` exist.
+- `review_docs=<paths>`, space-separated, names them. A named path missing from the commit is left out, and preflight warns about it.
+- `review_docs=none` says the repo has no such documents.
+
+Every prompt (both review passes, the fixer and the verifier) names the documents found and ranks the sources: documents > tests > code. With no documents the order is tests > code. A `CLAUDE.md` that sets a different order wins. In practice:
+
+- Pass 1 flags tests weakened, skipped or deleted to make changed code pass.
+- Pass 2 starts from any design overview among the documents and reads per-flow specs where they exist. It requires a doc update only when a change leaves a statement in the documents wrong; a change the documents don't describe needs none. With no documents it checks only the recorded decisions, and missing documentation is not a finding.
+- The fixer fixes the code, not the test, unless a higher source shows the test is wrong, and quotes that source when it changes a test.
+- The verifier keeps a finding open when it was "fixed" by changing a test no higher source called wrong.
+
+The review prints the documents it uses and lists them in the report header. A scaffolded repo's pre-push hook runs its own review, which reads `docs/` and gets the order from its `CLAUDE.md`.
+
 ## Concurrency
 
 Ships of different branches, or of different commits on one branch, run side by side, each in its own worktree.
@@ -320,6 +338,8 @@ deploy_run_grace=300
 deploy_poll_timeout=3600
 deploy_smoke_timeout=900
 ```
+
+Repos on the skill's review tooling also have `review_docs` (see Documented intent) and `fix_checks`.
 
 The existing keys stay: `pr_host`, `pr_merge_method`, `pr_self_approve`, `pr_poll_interval`, `pr_poll_timeout` and `ship_fix_retries`.
 
@@ -367,7 +387,7 @@ A merge that only changes files outside the dev pipeline's path filters (for exa
 
 1. **Confirm.** The skill asks, in one call, whether this is a prod deploy that merges `develop` into the branch, and whether to self-approve and auto-merge. No to the first cancels. The second sets the stage: no is `open_pr` (the recommended answer), yes is `merge` with `pr_self_approve=true`. A prod release ignores `ship_stage` from `.codereviewrc`: with no `--stage` or `CR_SHIP_STAGE`, it resolves to `open_pr` and the plan tags it `prod default`. `push` and `verify_deploy` fail preflight.
 2. **Plan.** Preflight fetches `develop` and the target, then freezes `origin/develop`'s tip as `SHIP_SHA`. It fails if `develop` has nothing the target doesn't, or if a PR from `develop` into the target is already open. It warns if the target has commits `develop` lacks, such as a hotfix. It skips the feature-branch checks: the current checkout, the pre-push hook and uncommitted changes don't matter.
-3. **Release notes.** The skill drafts notes from `git log --no-merges origin/<target>..<SHIP_SHA>` and the recorded decisions, writes them to `working/release-notes.md`, and plans again with `--notes-file`. The notes' hash is part of `SHIP_CONFIG`, along with the target, so an edit after the plan makes kickoff refuse. Kickoff copies the file to `.git/ship/<id>/release-notes.md`. Without `--notes-file`, the description is the commit subjects (minus `Apply code review auto-fix`) and the decisions.
+3. **Release notes.** The skill drafts notes from `git log --no-merges origin/<target>..<SHIP_SHA>` and the recorded decisions, writes them to `<git-common-dir>/ship/release-notes.md`, and plans again with `--notes-file`. The notes' hash is part of `SHIP_CONFIG`, along with the target, so an edit after the plan makes kickoff refuse. Kickoff copies the file to `.git/ship/<id>/release-notes.md`. Without `--notes-file`, the description is the commit subjects (minus `Apply code review auto-fix`) and the decisions.
 4. **Run.** There's no snapshot branch, no worktree and no push. The stages run from the checkout and touch only the PR host and remote refs. The PR goes from `develop` into the target, titled `prod 🚀`, with the notes and a footer naming the commit. `merge` always uses a merge commit (`pr_merge_method` applies to feature ships only) and never deletes `develop`. On GitHub, `gh pr merge --match-head-commit` pins the merge to `SHIP_SHA`. On both hosts, each poll fails the ship if the PR's head is no longer `SHIP_SHA`, since merging would release commits nobody planned.
 
 GitHub doesn't let you approve your own PR, so with self-approve the merge still waits for any review that branch protection requires.
