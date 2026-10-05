@@ -1,5 +1,6 @@
 ---
 name: ship
+version: 1.0.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and verify the dev deploy, as far as the
@@ -11,9 +12,11 @@ description: |
 
 # /ship
 
-`scripts/ship.sh` does the work in its own git worktree, so the developer keeps editing while it runs. This skill plans the ship, starts it, and relays its progress. `README.md` ("Shipping") documents the stages and settings.
+This skill's `scripts/ship.sh` does the work in its own git worktree, so the developer keeps editing while it runs. This skill plans the ship, starts it, and relays its progress. This skill's `README.md` documents the stages and settings.
 
-Decision trailers on the branch's commits (`README.md`, "Decision history") are copied into the PR description, and into the squash commit message when the merge stage squashes, so they survive the merge. `scripts/ship.sh` does this; nothing in this skill needs to.
+The project supplies the rest: the `make ship*` targets (its `Makefile` includes this skill's `ship.mk`), the pre-push review, `scripts/decisions.sh` and `scripts/lib/common.sh`, all written by the scaffold skill. If `make ship-plan` says there's no rule for the target, or `ship.sh` reports a missing `common.sh` or a `ship_contract` mismatch, relay the error and point at "Adding /ship to a project" in this skill's `README.md`. Don't work around it.
+
+Decision trailers on the branch's commits (the project's `README.md`, "Decision history") are copied into the PR description, and into the squash commit message when the merge stage squashes, so they survive the merge. `ship.sh` does this; nothing in this skill needs to.
 
 | Invocation | Does |
 |---|---|
@@ -26,7 +29,7 @@ Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A
 
 ## Rules
 
-- Start a ship only with the exact `make ship ...` command from step 5. Never run `bash scripts/ship.sh`, `git push`, `gh pr`, or `az repos` yourself as part of a ship.
+- Start a ship only with the exact `make ship ...` command from step 5. Never run `ship.sh` directly, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
 - The permission prompt on `make ship` is the only confirmation. Don't ask "shall I proceed?" before it.
 - Pass overrides only as `BRANCH=`, `STAGE=`, `SET=` and `NOTES=` on the make command, never as environment variables, so they show in the prompt.
 - Never edit `.codereviewrc` for a one-run change, and never set `SKIP_CODE_REVIEW`.

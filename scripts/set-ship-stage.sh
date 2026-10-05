@@ -7,13 +7,14 @@
 #   verify_deploy  also wait for the dev deploy, check health, run the smoke test
 #
 # Usage:
-#   scripts/set-ship-stage.sh <stage>    # make ship-stage STAGE=<stage>
-#   scripts/set-ship-stage.sh --prompt   # ask, default open_pr; no-op without a TTY (make setup)
+#   set-ship-stage.sh <stage>    # make ship-stage STAGE=<stage>
+#   set-ship-stage.sh --prompt   # ask, default open_pr; no-op without a TTY (make setup)
+# Run from the project root; it writes the project's .codereviewrc.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=lib/common.sh
-source "$script_dir/lib/common.sh"
+# shellcheck source=lib/ship-config.sh
+source "$script_dir/lib/ship-config.sh"
 
 stages="push open_pr merge verify_deploy"
 

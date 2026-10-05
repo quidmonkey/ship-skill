@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ship the current branch into develop (or --target) from a separate git
 # worktree, so none of it touches the developer's checkout. See docs in
-# README.md ("Shipping").
+# the ship skill's README.md.
 #
 # A prod ship (--target main or master) instead opens a PR from origin/develop,
 # frozen at its planned commit, into that branch: no worktree and no push
@@ -28,7 +28,8 @@
 #   ship.sh --status [ID] | --stop [ID] | --watch [ID]
 #
 # Settings resolve as --set, then CR_<KEY>, then .codereviewrc, then the
-# built-in default (lib/common.sh). Overrides are exported as CR_<KEY>, so the
+# built-in default (the project's scripts/lib/common.sh for review keys,
+# lib/ship-config.sh for ship keys). Overrides are exported as CR_<KEY>, so the
 # pre-push review in the worktree sees them too. They're never written back.
 #
 # Without --id, kickoff shows the plan and asks Proceed? [y/N] on a terminal,
@@ -40,8 +41,8 @@
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=lib/common.sh
-source "$script_dir/lib/common.sh"
+# shellcheck source=lib/ship-config.sh
+source "$script_dir/lib/ship-config.sh"
 # shellcheck source=lib/ship-status.sh
 source "$script_dir/lib/ship-status.sh"
 # shellcheck source=lib/ship-deploy.sh
@@ -110,7 +111,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-cd "$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repository."
+cd "$project_root" || die "can't cd to $project_root."
 
 # ship_dev is the integration branch: the default target, and what a prod ship
 # releases. ship_base is this ship's target.
@@ -446,6 +447,8 @@ preflight_feature() {
     [ -n "$(git status --porcelain)" ] \
         && pf_warn "Uncommitted changes in your checkout aren't part of this ship. Only commits up to $sha7 ship."
 
+    [ -f "$project_scripts/decisions.sh" ] \
+        || pf_fail "scripts/decisions.sh is missing; the PR description and squash message need it. Copy it from the scaffold skill's templates."
     hook=$(git rev-parse --git-path hooks/pre-push)
     if [ -f "$hook" ]; then
         pf_ok "pre-push hook installed"
@@ -727,7 +730,7 @@ pr_body() {
     echo ""
     git log --reverse --format='- %s' "origin/$ship_base..HEAD"
     echo ""
-    decisions=$(bash "$script_dir/decisions.sh" --range "origin/$ship_base..HEAD")
+    decisions=$(bash "$project_scripts/decisions.sh" --range "origin/$ship_base..HEAD")
     if [ -n "$decisions" ]; then
         echo "## Decisions"
         echo ""
@@ -758,7 +761,7 @@ prod_pr_body() {
         echo "## Changes"
         echo ""
         git log --no-merges --reverse --format='- %s' "$range" | grep -vx -e '- Apply code review auto-fix'
-        decisions=$(bash "$script_dir/decisions.sh" --range "$range")
+        decisions=$(bash "$project_scripts/decisions.sh" --range "$range")
         if [ -n "$decisions" ]; then
             echo ""
             echo "## Decisions"
@@ -883,7 +886,7 @@ pr_poll() {
 # leaves the host's default message. Without this a squash merge drops them.
 squash_body() {
     local trailers
-    trailers=$(bash "$script_dir/decisions.sh" --trailers --range "origin/$ship_base..HEAD")
+    trailers=$(bash "$project_scripts/decisions.sh" --trailers --range "origin/$ship_base..HEAD")
     [ -n "$trailers" ] || return 0
     git log --reverse --format='* %s' "origin/$ship_base..HEAD"
     echo ""
@@ -1160,12 +1163,10 @@ fi
 ship_event "$ship_dir" kickoff passed "$kickoff_msg" >> "$ship_dir/ship.log"
 
 if [ "$detach" = true ]; then
-    # The worktree's copy is the snapshot's own and nobody edits it mid-run;
-    # the checkout's copy is the fallback when ship.sh isn't committed.
-    runner="$script_dir/ship.sh"
-    [ -n "$worktree" ] && [ -f "$worktree/scripts/ship.sh" ] && runner="$worktree/scripts/ship.sh"
+    # Runs from the worktree, so the resumed ship sources the snapshot's own
+    # scripts/lib/common.sh and decisions.sh.
     cd "${worktree:-$repo_root}" || die "worktree $worktree is gone."
-    nohup bash "$runner" --resume "$ship_id" > /dev/null 2>&1 &
+    nohup bash "$script_dir/ship.sh" --resume "$ship_id" > /dev/null 2>&1 &
     echo $! > "$ship_dir/pid"
     echo "Ship $ship_id started in the background."
     echo "SHIP_ID=$ship_id"
