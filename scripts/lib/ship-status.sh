@@ -79,7 +79,7 @@ status_get() {
 # osascript on macOS, a toast through powershell.exe on Windows (Git Bash or
 # WSL), notify-send on Linux. Does nothing when none of them is installed.
 ship_notify() {
-    [ "$(rc_value ship_notify)" = desktop ] || return 0
+    [ "$(ship_value ship_notify)" = desktop ] || return 0
     local msg q="'"
     msg=$(printf '%s' "$1" | tr "\"\\\\" "'/")
     if command -v osascript >/dev/null 2>&1; then

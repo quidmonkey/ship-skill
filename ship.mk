@@ -1,7 +1,7 @@
 # /ship make targets. A project's Makefile includes this file:
 #   SHIP_SKILL ?= $(HOME)/.claude/skills/ship
 #   -include $(SHIP_SKILL)/ship.mk
-# Recipes run in the project root, against its .codereviewrc and scripts/.
+# Recipes run in the project root, against its .shiprc and scripts/.
 
 SHIP_SKILL ?= $(HOME)/.claude/skills/ship
 ship_sh = bash "$(SHIP_SKILL)/scripts/ship.sh"

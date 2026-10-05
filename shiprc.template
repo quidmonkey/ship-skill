@@ -1,6 +1,29 @@
+# Personal settings for the ship skill (/ship), kept out of git by .gitignore.
+# The ship created this file from ~/.claude/skills/ship/shiprc.template; its
+# README.md describes every key. Format: key=value, one per line, no quotes.
+#
+# Any key can be overridden for one run without editing this file:
+#   /ship merge review_model=sonnet   (or make ship SET='review_model=sonnet;ship_stage=merge')
+#   CR_REVIEW_MODEL=sonnet            (CR_ + the key in uppercase)
+# An empty override means the built-in default. An unknown key fails the run.
 
-# --- Shipping (/ship, make ship) -------------------------------------------------
-# Appended from the ship skill (~/.claude/skills/ship/codereviewrc.ship).
+# --- Review (repos without their own review tooling) ------------------------------
+# A repo the scaffold skill created keeps these in its .codereviewrc instead.
+# Uncomment to change a default.
+# review_agent=claude          # claude | custom (custom needs command=)
+# review_model=opus            # pass 1, the general review
+# review_effort=high           # low | medium | high | xhigh | max | default
+# review_spec_model=sonnet     # pass 2 and fix verification
+# review_spec_effort=medium
+# enabled=true                 # false turns the review off
+# fix_enabled=true             # false stops at the first failed review
+# fix_agent=claude             # claude | custom (custom needs fix_command=)
+# fix_model=sonnet
+# fix_effort=medium
+# fix_max_iterations=2
+# agent_timeout=900            # seconds per agent call
+
+# --- Shipping ------------------------------------------------------------------------
 
 # Max times one ship commits an auto-fix and pushes again
 # (non-negative integer). No confirmation: the ship's worktree is its own, and

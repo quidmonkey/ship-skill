@@ -74,7 +74,7 @@ deploy_preflight() {
         [ -n "$(cfg "$key")" ] || missing="$missing $key"
     done
     if [ -n "$missing" ]; then
-        pf_fail "verify_deploy needs these set in .codereviewrc (or with --set):$missing."
+        pf_fail "verify_deploy needs these set in .shiprc (or with --set):$missing."
         return
     fi
     # agent_engine is Agent Runtime's earlier name; both read the same API.

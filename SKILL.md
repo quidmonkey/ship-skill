@@ -1,6 +1,6 @@
 ---
 name: ship
-version: 1.2.0
+version: 1.3.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and verify the dev deploy, as far as the
@@ -34,7 +34,7 @@ Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A
 - Start a ship only with the exact `ship.sh --detach ...` command from step 5. Run `ship.sh` only in the forms shown here, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
 - The permission prompt on `ship.sh --detach` is the only confirmation. Don't ask "shall I proceed?" before it.
 - Pass overrides only as `--target`, `--stage`, `--sets` and `--notes-file` arguments, never as environment variables, so they show in the prompt.
-- Never edit `.codereviewrc` for a one-run change, and never set `SKIP_CODE_REVIEW`.
+- Never edit `.shiprc` (or a scaffolded repo's `.codereviewrc`) for a one-run change, and never set `SKIP_CODE_REVIEW`.
 
 ## Kickoff
 
@@ -44,12 +44,14 @@ Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A
 - A stage word becomes `--stage <stage>`.
 - Each `key=value` becomes an entry in `--sets`, joined with `;`: `--sets 'review_model=sonnet;pr_reviewers=alice'`.
 - Plain language maps to keys: "use sonnet for the review" is `review_model=sonnet`, "have Jane review" is `pr_reviewers=<Jane's GitHub username, or email on ADO>`. If a name doesn't map to a handle you know, ask for it.
-- A value containing `'` or `;` can't go through `--sets`. Ask the developer to put it in `.codereviewrc` instead.
+- A value containing `'` or `;` can't go through `--sets`. Ask the developer to put it in `.shiprc` instead.
 - After a denied prompt, a follow-up like "same, but with review_effort=max" keeps the previous overrides and adds the new one.
 
 ### 2. Plan
 
-Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan [--target ...] [--stage ...] [--sets '...']`. It's read-only and prints the config block, then `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=` lines.
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan [--target ...] [--stage ...] [--sets '...']`. It prints the config block, then `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=` lines.
+
+The plan is read-only except on the first ship in a repo without `.shiprc`. That plan creates `.shiprc` from the skill's template, adds it to `.gitignore`, and commits `.gitignore` on the current branch. It prints a `NOTE:` line for each step. Tell the developer about every `NOTE:` line, word for word, before the config block. One that says the change wasn't committed names why; pass that on too.
 
 ### 3. Reviewers (open_pr only)
 
@@ -103,13 +105,13 @@ Ask both with one `AskUserQuestion` call:
 - "This is a prod deploy: open a PR merging develop into <branch>?" Options **Yes, prod release** and **No, cancel**.
 - "Self-approve and auto-merge into <branch> once its checks pass?" Options **No, a human approves and merges (Recommended)** and **Yes, self-approve and auto-merge**.
 
-If the first answer is no, reply "Ship cancelled, nothing was created." and stop. Otherwise the second sets the stage: no is `--stage open_pr`, yes is `--stage merge` and adds `pr_self_approve=true` to `--sets`. A prod release ignores `ship_stage` from `.codereviewrc`, so always pass `--stage`. On GitHub, approving your own PR isn't allowed, so with yes the merge still waits for any required human review; say so if the plan or the ship reports the self-approval was rejected.
+If the first answer is no, reply "Ship cancelled, nothing was created." and stop. Otherwise the second sets the stage: no is `--stage open_pr`, yes is `--stage merge` and adds `pr_self_approve=true` to `--sets`. A prod release ignores `ship_stage` from `.shiprc`, so always pass `--stage`. On GitHub, approving your own PR isn't allowed, so with yes the merge still waits for any required human review; say so if the plan or the ship reports the self-approval was rejected.
 
 Other `key=value` words from the invocation still go in `--sets`.
 
 ### 2. Plan
 
-Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan --target <branch> --stage <stage> [--sets '...']`. If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with its fix and stop. The plan fetches `develop` and `<branch>`, so `SHIP_SHA` is `origin/develop`'s current tip.
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan --target <branch> --stage <stage> [--sets '...']`. Relay any `NOTE:` lines as in Kickoff step 2. If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with its fix and stop. The plan fetches `develop` and `<branch>`, so `SHIP_SHA` is `origin/develop`'s current tip.
 
 With `--stage open_pr`, ask about reviewers as in Kickoff step 3; a prod PR that waits for a human is where they matter most.
 

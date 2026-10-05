@@ -23,12 +23,12 @@
 # rounds). Fixes are left uncommitted for review; the push stays blocked either
 # way — a passing working tree isn't a passing commit yet.
 #
-# Config: .codereviewrc (key=value) — review_agent, review_model,
+# Config: .shiprc (key=value) — review_agent, review_model,
 #         review_effort, review_spec_model, review_spec_effort, enabled,
 #         command, fix_enabled, fix_agent, fix_model, fix_effort, fix_command,
 #         fix_checks, agent_timeout, review_docs. Any key can be
 #         overridden for one push with CR_<KEY>, e.g. CR_REVIEW_MODEL=sonnet.
-# Skip:   SKIP_CODE_REVIEW=true git push, or enabled=false in .codereviewrc.
+# Skip:   SKIP_CODE_REVIEW=true git push, or enabled=false in .shiprc.
 # Base:   REVIEW_BASE_BRANCH replaces the default branch as a branch's
 #         first-review base (ship.sh sets it to develop).
 #
@@ -43,7 +43,7 @@ source "$script_dir/lib/common.sh"
 # shellcheck source=lib/review-docs.sh
 source "$script_dir/lib/review-docs.sh"
 
-rc_file=".codereviewrc"
+rc_file=".shiprc"
 report="working/code-review-report.md"
 
 # --- skip checks -------------------------------------------------------------

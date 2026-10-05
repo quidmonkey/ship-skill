@@ -2,7 +2,8 @@
 # Shared helpers for code-review.sh and ship.sh. The ship skill's own copy of
 # the scaffold skill's templates/scripts/lib/common.sh, used in a repo that
 # doesn't have its own (see ship-config.sh). Keep the rc_*, ledger_* and
-# with_timeout helpers in step with that template. Sourced, not executed — no
+# with_timeout helpers in step with that template, except that this copy reads
+# .shiprc where the template reads .codereviewrc. Sourced, not executed — no
 # shebang, no set -u here (each caller sets its own options).
 
 # Constants below are used by the scripts that source this file.
@@ -22,7 +23,7 @@ ship_contract=1
 # to be committed. Gitignored, like the report.
 autofix_marker="working/autofix-pending.marker"
 
-# Every review key .codereviewrc understands. The ship skill appends its own
+# Every review key .shiprc understands. The ship skill appends its own
 # keys when it sources this file. An override (--set or CR_<KEY>) naming
 # anything else is a typo and fails, so it can't be silently ignored.
 rc_known_keys="review_agent review_model review_effort review_spec_model
@@ -38,12 +39,12 @@ rc_env_name() {
 
 # rc_get <key> [rc-file] — the raw value of <key>: the CR_<KEY> environment
 # variable if it's set (even to empty, which means "use the default"),
-# otherwise key=value from an rc file (default .codereviewrc), one per line.
+# otherwise key=value from an rc file (default .shiprc), one per line.
 # Strips inline comments (whitespace then #) and surrounding whitespace, so a
 # line copied with its trailing comment parses. Prints the last matching line
 # if a key repeats. Prints nothing for an unset key; see rc_value.
 rc_get() {
-    local key=$1 file=${2:-.codereviewrc} env_name
+    local key=$1 file=${2:-.shiprc} env_name
     env_name=$(rc_env_name "$key")
     if [ -n "${!env_name+x}" ]; then
         printf '%s\n' "${!env_name}"
@@ -55,7 +56,7 @@ rc_get() {
 }
 
 # rc_default <key> — the built-in default, used when no override or rc line
-# sets a value. An absent .codereviewrc behaves exactly like the scaffolded one.
+# sets a value. An absent .shiprc behaves exactly like the template.
 # Keys this file doesn't know go to rc_default_extra when a caller defines it
 # (the ship skill does, for its keys).
 rc_default() {
@@ -136,7 +137,7 @@ default_branch() {
 # Creates the file (with a header comment) if it doesn't exist yet. Used to
 # record a personal choice (e.g. ship_stage) without touching other keys.
 rc_set() {
-    local key=$1 value=$2 file=${3:-.codereviewrc}
+    local key=$1 value=$2 file=${3:-.shiprc}
     if [ ! -f "$file" ]; then
         printf '# Personal review/ship automation settings (kept out of git) -- see the README.md of the ship skill.\n' > "$file"
     fi

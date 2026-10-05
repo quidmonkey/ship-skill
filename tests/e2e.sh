@@ -67,8 +67,11 @@ echo fixed >> app.txt
 echo "Fix summary"; echo "FIXED app.txt:1"
 EOF
 
-# new_repo <name> — a repo on feature/x, one commit ahead of origin/develop.
+# new_repo <name> [settings-file] — a repo on feature/x, one commit ahead of
+# origin/develop, with the stub agents set in .shiprc, or in the named file
+# (a scaffolded repo's .codereviewrc, which its .gitignore would ignore).
 new_repo() {
+    local rc=${2:-.shiprc}
     git init -q --bare -b develop "$sb/$1-origin.git"
     git init -q -b develop "$sb/$1"
     cd "$sb/$1" || exit 1
@@ -83,12 +86,13 @@ new_repo() {
     git checkout -qb feature/x
     echo change >> app.txt
     git commit -qam "Change app" -m "Decision: keep app.txt plain text"
-    cat > .codereviewrc <<EOF
+    cat > "$rc" <<EOF
 review_agent=custom
 command=sh $sb/review.sh
 fix_agent=custom
 fix_command=sh $sb/fix.sh
 EOF
+    [ "$rc" = .codereviewrc ] && echo .codereviewrc >> .git/info/exclude
     echo pass > "$sb/mode"
 }
 
@@ -96,9 +100,26 @@ EOF
 
 echo "== plain repo"
 new_repo plain
+mv .shiprc "$sb/stubs"
+# An old .codereviewrc isn't read or copied.
+cp "$sb/stubs" .codereviewrc
+echo .codereviewrc >> .git/info/exclude
 
 out=$(bash "$ship" --plan --stage push 2>&1)
+expect "first plan creates .shiprc" "NOTE: created \.shiprc with the default ship settings" "$out"
+expect "first plan commits .shiprc to .gitignore" "NOTE: added \.shiprc to \.gitignore and committed it on feature/x" "$out"
+assert "the new .shiprc is the template" "$(diff .shiprc "$skill/shiprc.template")" cmp -s .shiprc "$skill/shiprc.template"
+expect ".codereviewrc settings aren't used" "review_agent +claude +default" "$out"
+cat "$sb/stubs" >> .shiprc
+out=$(bash "$ship" --plan --stage push 2>&1)
+expect "settings are read from .shiprc" "review_agent +custom +\.shiprc" "$out"
 expect "plan passes with no project tooling" "SHIP_PREFLIGHT=passed" "$out"
+expect "the .gitignore commit is on the branch" "^Ignore \.shiprc" "$(git log -1 --format=%s)"
+expect "the .gitignore commit has only .gitignore" "^\.gitignore$" "$(git show --name-only --format= HEAD)"
+expect ".gitignore ignores .shiprc" "^\.shiprc$" "$(cat .gitignore)"
+assert ".shiprc stays out of git status" "$(git status --porcelain)" [ -z "$(git status --porcelain)" ]
+out=$(bash "$ship" --plan --stage push 2>&1)
+refute "a later plan has no notes" "NOTE:" "$out"
 expect "plan names the skill's review" "review: the ship skill's code-review.sh" "$out"
 expect "no ship_setup without pyproject.toml" "ship_setup +\(none\)" "$out"
 refute "uv isn't required" "uv isn't on PATH" "$out"
@@ -139,7 +160,7 @@ assert "checkout is clean" "$(git status)" [ -z "$(git status --porcelain)" ]
 excl=$(cat .git/info/exclude)
 expect "the review report is excluded locally" "^working/code-review-report.md$" "$excl"
 refute "working/ itself isn't excluded" "^working/?$" "$excl"
-expect ".codereviewrc excluded locally" "^\.codereviewrc$" "$excl"
+refute ".shiprc isn't excluded locally" "shiprc" "$excl"
 assert "report copied to the ship dir" "$(ls ".git/ship/$id")" [ -f ".git/ship/$id/code-review-report.md" ]
 out=$(bash "$ship" --status 2>&1)
 expect "status lists the ship" "$id" "$out"
@@ -167,7 +188,7 @@ asnap=$(snapshot_of "$(latest)")
 expect "origin tip is the auto-fix commit" "Apply code review auto-fix" "$(git log -1 --format=%s "origin/$asnap" 2>&1)"
 files=$(git show --name-only --format= "origin/$asnap")
 expect "auto-fix commit has the fix" "^app.txt$" "$files"
-refute "auto-fix commit has no working/ or .codereviewrc" "working/|codereviewrc" "$files"
+refute "auto-fix commit has no working/ or settings" "working/|shiprc|codereviewrc" "$files"
 assert "leftover worktree replaced and cleaned" "$(git worktree list)" no_extra_worktrees
 
 # The repo's own pre-push hook still runs after the review.
@@ -201,11 +222,27 @@ expect "--stop stops it" "Stopped ship $sid" "$out"
 rm .git/hooks/pre-push
 
 out=$(bash "$skill/scripts/set-ship-stage.sh" merge 2>&1)
-expect "set-ship-stage writes the stage" "ship_stage=merge written" "$out"
-refute ".codereviewrc stays out of git status" "codereviewrc" "$(git status --porcelain)"
+expect "set-ship-stage writes the stage" "ship_stage=merge written to \.shiprc" "$out"
+expect "set-ship-stage writes .shiprc" "^ship_stage=merge$" "$(grep '^ship_stage=' .shiprc | tail -n 1)"
+refute "settings stay out of git status" "shiprc|codereviewrc" "$(git status --porcelain)"
 bash "$skill/scripts/set-ship-stage.sh" push > /dev/null 2>&1
 assert "exclude lines aren't duplicated" "$(cat .git/info/exclude)" \
-    [ "$(grep -cxF .codereviewrc .git/info/exclude)" = 1 ]
+    [ "$(grep -cxF working/code-review-report.md .git/info/exclude)" = 1 ]
+
+# --- .gitignore can't be committed: the line is added, the note says why ----------
+
+echo "== uncommitted .gitignore"
+new_repo dirtyignore
+echo "*.log" > .gitignore
+out=$(bash "$ship" --plan --stage push 2>&1)
+expect "a .gitignore with local changes isn't committed" "didn't commit it, because it has uncommitted changes of yours" "$out"
+expect "the line is still added" "^\.shiprc$" "$(cat .gitignore)"
+expect "nothing was committed" "^Change app$" "$(git log -1 --format=%s)"
+git checkout -q develop
+rm -f .shiprc
+rm -f .gitignore
+out=$(bash "$ship" --plan --stage push 2>&1)
+expect "on develop the .gitignore change isn't committed" "didn't commit it, because you're on develop" "$out"
 
 # --- a documented repo: the review finds docs/ and README.md ----------------------
 
@@ -250,20 +287,22 @@ files=$(git show --name-only --format= "origin/$(snapshot_of "$(latest)")")
 expect "auto-fix commit has the tracked working/ fix" "^working/notes.md$" "$files"
 refute "auto-fix commit leaves the review reports out" "code-review|autofix-pending" "$files"
 
-# --- a repo that tracks .codereviewrc: personal edits stay out of commits ---------
+# --- a repo that tracks .shiprc: personal edits stay out of commits ----------------
 
-echo "== tracked .codereviewrc"
+echo "== tracked .shiprc"
 new_repo tracked
-git add -f .codereviewrc
-git commit -qm "Track review settings"
-echo "# personal edit" >> .codereviewrc
+git add -f .shiprc
+git commit -qm "Track ship settings"
+echo "# personal edit" >> .shiprc
 echo autofix > "$sb/mode"
 out=$(bash "$ship" --yes --stage push 2>&1)
+refute "a tracked .shiprc gets no notes" "NOTE:" "$out"
 expect "tracked-settings ship passes" "shipped to push" "$out"
 files=$(git show --name-only --format= "origin/$(snapshot_of "$(latest)")")
 expect "auto-fix commit has the fix" "^app.txt$" "$files"
-refute "auto-fix commit leaves the tracked .codereviewrc out" "codereviewrc" "$files"
-refute "a tracked .codereviewrc isn't excluded" "codereviewrc" "$(cat .git/info/exclude)"
+refute "auto-fix commit leaves the tracked .shiprc out" "shiprc" "$files"
+refute "a tracked .shiprc isn't excluded" "shiprc" "$(cat .git/info/exclude)"
+assert "a tracked .shiprc isn't added to .gitignore" "$(cat .gitignore 2>&1)" [ ! -f .gitignore ]
 
 # --- a Python repo: ship_setup syncs the worktree --------------------------------
 
@@ -284,13 +323,17 @@ expect "ship_setup can be overridden" "ship_setup +false" "$out"
 # --- a scaffolded repo: the project's tooling and pre-push hook -------------------
 
 echo "== scaffolded repo"
-new_repo scaffolded
+new_repo scaffolded .codereviewrc
 if [ -f "$scaffold_common" ]; then
     mkdir -p scripts/lib
     cp "$scaffold_common" scripts/lib/common.sh
     git add scripts
     git commit -qm "Add review tooling"
-    out=$(bash "$ship" --plan --stage push 2>&1)
+    echo ship_stage=push >> .codereviewrc
+    out=$(bash "$ship" --plan 2>&1)
+    expect "a scaffolded repo gets a new .shiprc" "NOTE: created \.shiprc with the default ship settings" "$out"
+    expect "ship keys come from .shiprc, not .codereviewrc" "ship_stage +open_pr +\.shiprc" "$out"
+    expect "review keys stay in .codereviewrc" "review_agent +custom +\.codereviewrc" "$out"
     expect "a missing pre-push hook fails" "pre-push hook isn't installed" "$out"
     printf '#!/bin/sh\nexit 0\n' > .git/hooks/pre-push
     chmod +x .git/hooks/pre-push

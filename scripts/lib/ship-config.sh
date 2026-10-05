@@ -42,11 +42,17 @@ source "$skill_scripts/lib/review-docs.sh"
 decisions_sh="$project_root/scripts/decisions.sh"
 [ -f "$decisions_sh" ] || decisions_sh="$skill_scripts/decisions.sh"
 
+# The ship's personal settings. ship_rc_init creates the file and ignores it
+# in .gitignore. A project with its own review tooling keeps its review keys
+# in its .codereviewrc (see rc_file_of).
+ship_rc=.shiprc
+
 # ship_local_paths — paths a ship writes that must never be committed: the
 # review's reports and personal settings. Files rather than all of working/,
 # so a repo that tracks its own working/ keeps committing it.
 ship_local_paths="working/code-review-report.md working/code-review-findings.md
-working/code-review-fix-summary.md $autofix_marker .codereviewrc"
+working/code-review-fix-summary.md $autofix_marker $ship_rc"
+[ "$review_tooling" = project ] && ship_local_paths="$ship_local_paths .codereviewrc"
 
 # ship_exclude_local — adds each of ship_local_paths to the repo's local
 # excludes (.git/info/exclude, never committed) unless it's already ignored,
@@ -68,11 +74,77 @@ ship_exclude_local() {
 # changes it), and the branch a prod ship (--target main or master) releases.
 ship_base=develop
 
-rc_known_keys="$rc_known_keys review_docs ship_stage ship_setup ship_fix_retries ship_log_retention_days
+ship_keys="review_docs ship_stage ship_setup ship_fix_retries ship_log_retention_days
 ship_notify pr_host pr_merge_method pr_self_approve pr_poll_interval
 pr_poll_timeout pr_reviewers deploy_pipeline deploy_provider deploy_project
 deploy_region deploy_name deploy_match deploy_proxy deploy_smoke
 deploy_run_grace deploy_poll_timeout deploy_smoke_timeout"
+rc_known_keys="$rc_known_keys $ship_keys"
+
+# rc_file_of <key> — the file <key> is set in. A project with its own review
+# tooling reads its review keys from .codereviewrc, so the ship does too;
+# every other key is in .shiprc.
+rc_file_of() {
+    if [ "$review_tooling" = project ] && ! in_list "$1" "$ship_keys"; then
+        echo .codereviewrc
+    else
+        echo "$ship_rc"
+    fi
+}
+
+# ship_value <key> — rc_value, read from rc_file_of <key>.
+ship_value() {
+    local v
+    v=$(rc_get "$1" "$(rc_file_of "$1")")
+    if [ -n "$v" ]; then
+        printf '%s\n' "$v"
+    else
+        rc_default "$1"
+    fi
+}
+
+# ship_rc_init — creates .shiprc from shiprc.template when it's missing, then
+# ignores it (see ship_rc_ignore). Prints a NOTE: line for each change, for
+# /ship to relay.
+ship_rc_init() {
+    if [ ! -f "$ship_rc" ]; then
+        cp "$skill_scripts/../shiprc.template" "$ship_rc"
+        echo "NOTE: created $ship_rc with the default ship settings. Edit it to change them."
+    fi
+    ship_rc_ignore
+}
+
+# ship_rc_ignore — adds .shiprc to .gitignore unless something already ignores
+# it or it's tracked, and commits that on the current branch. The commit names
+# only .gitignore, so nothing else staged goes with it. It's left uncommitted
+# when .gitignore has the developer's own changes, or HEAD isn't a branch a
+# ship ships from.
+ship_rc_ignore() {
+    local branch why=""
+    git check-ignore -q "$ship_rc" && return 0
+    [ -n "$(git ls-files -- "$ship_rc")" ] && return 0
+    [ -n "$(git status --porcelain -- .gitignore)" ] && why="it has uncommitted changes of yours"
+    if [ -s .gitignore ] && [ -n "$(tail -c 1 .gitignore)" ]; then
+        echo >> .gitignore
+    fi
+    printf '# Personal settings for the ship skill\n%s\n' "$ship_rc" >> .gitignore
+    branch=$(git symbolic-ref -q --short HEAD)
+    if [ -z "$why" ]; then
+        if [ -z "$branch" ]; then
+            why="HEAD is detached"
+        elif in_list "$branch" "${ship_dev:-$ship_base} $ship_base main master"; then
+            why="you're on $branch"
+        fi
+    fi
+    if [ -z "$why" ]; then
+        if git add -- .gitignore && git commit -q -m "Ignore $ship_rc, the ship skill's personal settings" -- .gitignore >/dev/null; then
+            echo "NOTE: added $ship_rc to .gitignore and committed it on $branch ($(git rev-parse --short HEAD))."
+            return 0
+        fi
+        why="git commit failed"
+    fi
+    echo "NOTE: added $ship_rc to .gitignore but didn't commit it, because $why. Commit .gitignore yourself."
+}
 
 # rc_default_extra <key> — the built-in default for a ship key. The project's
 # rc_default calls it for any key it doesn't know.

@@ -8,10 +8,11 @@
 # (every change was reviewed on its way into develop). The PR is titled
 # 'prod 🚀' with the --notes-file release notes as its description, it merges
 # with a merge commit and never deletes develop, and its stage defaults to
-# open_pr whatever .codereviewrc says.
+# open_pr whatever .shiprc says.
 #
-#   plan      read .codereviewrc and overrides, check the repo and every tool the
-#             stage needs, print the config block. Creates nothing.
+#   plan      read .shiprc and overrides, check the repo and every tool the
+#             stage needs, print the config block. Creates nothing but .shiprc
+#             (see first run, below).
 #   kickoff   freeze HEAD as ship/<branch>-<sha7> (ship/<target>/<branch>-<sha7>
 #             for a target other than develop), seed its review-ledger entry,
 #             create the worktree ../<repo>.ship-<id>, and .git/ship/<id>/.
@@ -27,10 +28,16 @@
 #           [--id ID --expect-sha SHA --expect-config HASH]
 #   ship.sh --status [ID] | --stop [ID] | --watch [ID]
 #
-# Settings resolve as --set, then CR_<KEY>, then .codereviewrc, then the
-# built-in default (the project's scripts/lib/common.sh for review keys,
-# lib/ship-config.sh for ship keys). Overrides are exported as CR_<KEY>, so the
-# pre-push review in the worktree sees them too. They're never written back.
+# Settings resolve as --set, then CR_<KEY>, then .shiprc, then the built-in
+# default (the project's scripts/lib/common.sh for review keys,
+# lib/ship-config.sh for ship keys). A project with its own review tooling
+# keeps its review keys in .codereviewrc instead of .shiprc. Overrides are
+# exported as CR_<KEY>, so the pre-push review in the worktree sees them too.
+# They're never written back.
+#
+# First run: a plan or kickoff in a repo without .shiprc creates it as a copy
+# of shiprc.template (nothing comes from .codereviewrc), and commits .shiprc
+# to .gitignore on the current branch. Each prints a NOTE: line.
 #
 # Without --id, kickoff shows the plan and asks Proceed? [y/N] on a terminal,
 # and refuses without one unless --yes. With --id (what /ship passes after its
@@ -107,7 +114,7 @@ while [ $# -gt 0 ]; do
         --set) add_set "${2:?--set needs key=value}"; shift ;;
         --sets)
             # make ship SET='k=v;k=v'. A value containing ; must come from
-            # CR_<KEY> or .codereviewrc instead.
+            # CR_<KEY> or .shiprc instead.
             IFS=';' read -r -a pairs <<< "${2:-}"
             for pair in ${pairs[@]+"${pairs[@]}"}; do
                 [ -n "$(printf '%s' "$pair" | tr -d '[:space:]')" ] && add_set "$pair"
@@ -148,28 +155,18 @@ case "$mode" in
     status) ship_status_report "$ship_id"; exit ;;
     stop) ship_stop "$ship_id"; exit ;;
     watch) ship_watch "$ship_id"; exit ;;
+    plan | run) ship_rc_init ;;
 esac
 
 # --- configuration ---------------------------------------------------------------
 
 # resolve_config — sets cfg_<key> for every known key.
 resolve_config() {
-    local key legacy
+    local key
     # shellcheck disable=SC2086 # word-splitting the key list is the point
     for key in $rc_known_keys; do
-        printf -v "cfg_$key" '%s' "$(rc_value "$key")"
+        printf -v "cfg_$key" '%s' "$(ship_value "$key")"
     done
-    # Migration: pr_automation predates ship_stage. Honored only while nothing
-    # sets ship_stage.
-    migrated_stage=""
-    legacy=$(sed -n 's/^pr_automation=//p' .codereviewrc 2>/dev/null | tail -n 1 | sed 's/[[:space:]].*//')
-    if [ -n "$legacy" ] && [ "$(cfg_source ship_stage)" = default ]; then
-        case "$legacy" in
-            true) migrated_stage=merge ;;
-            *) migrated_stage=push ;;
-        esac
-        cfg_ship_stage=$migrated_stage
-    fi
     # A prod ship goes past open_pr only when this run asks for it: the
     # configured stage is for feature ships.
     prod_stage_default=false
@@ -183,17 +180,15 @@ resolve_config() {
 
 # cfg_source <key> — where <key>'s value came from.
 cfg_source() {
-    local env_name
+    local env_name file
     case "$set_keys" in *" $1 "*) echo "--set"; return ;; esac
     env_name=$(rc_env_name "$1")
     if [ -n "${!env_name+x}" ]; then
         echo "env $env_name"
     elif [ "$1" = ship_stage ] && [ "${prod_stage_default:-false}" = true ]; then
         echo "prod default"
-    elif [ "$1" = ship_stage ] && [ -n "${migrated_stage:-}" ]; then
-        echo ".codereviewrc (pr_automation)"
-    elif grep -q "^$1=" .codereviewrc 2>/dev/null; then
-        echo ".codereviewrc"
+    elif file=$(rc_file_of "$1") && grep -q "^$1=" "$file" 2>/dev/null; then
+        echo "$file"
     else
         echo default
     fi
@@ -317,9 +312,9 @@ validate_config() {
     check_int deploy_poll_timeout 1
     check_int deploy_smoke_timeout 1
     [ "$cfg_review_agent" = custom ] && [ -z "$cfg_command" ] \
-        && pf_fail "review_agent=custom needs command= in .codereviewrc."
+        && pf_fail "review_agent=custom needs command= in $(rc_file_of command)."
     [ "$cfg_fix_enabled" = true ] && [ "$cfg_fix_agent" = custom ] && [ -z "$cfg_fix_command" ] \
-        && pf_fail "fix_agent=custom needs fix_command= in .codereviewrc."
+        && pf_fail "fix_agent=custom needs fix_command= in $(rc_file_of fix_command)."
     return 0
 }
 
@@ -575,8 +570,6 @@ preflight() {
     fi
 
     validate_config
-    [ -n "$migrated_stage" ] \
-        && pf_warn "pr_automation is deprecated: read as ship_stage=$migrated_stage. Run make ship-stage STAGE=<stage> to replace it."
 
     if stage_at_least open_pr; then
         preflight_host
@@ -1186,8 +1179,10 @@ if ! $prod; then
     fi
     ship_exclude_local
     git worktree add -q "$worktree" "$snapshot" || rollback "git worktree add failed."
-    # .codereviewrc is ignored, so the worktree doesn't have it.
-    [ -f .codereviewrc ] && cp .codereviewrc "$worktree/.codereviewrc"
+    # The settings files are ignored, so the worktree doesn't have them.
+    for p in "$ship_rc" .codereviewrc; do
+        [ -f "$p" ] && cp "$p" "$worktree/$p"
+    done
     mkdir -p "$worktree/working"
     if [ -n "$cfg_ship_setup" ]; then
         echo "Setting up the worktree: $cfg_ship_setup"
