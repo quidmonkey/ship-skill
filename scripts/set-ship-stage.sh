@@ -9,7 +9,8 @@
 # Usage:
 #   set-ship-stage.sh <stage>    # make ship-stage STAGE=<stage>
 #   set-ship-stage.sh --prompt   # ask, default open_pr; no-op without a TTY (make setup)
-# Run from the project root; it writes the project's .codereviewrc.
+# Run from the project root; it writes the project's .codereviewrc, which is
+# kept out of git through .git/info/exclude when nothing ignores it.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -23,6 +24,7 @@ set_stage() {
         echo "ERROR: unknown stage '$1' (push | open_pr | merge | verify_deploy)." >&2
         exit 1
     fi
+    ship_exclude_local
     rc_set ship_stage "$1"
     echo "ship_stage=$1 written to .codereviewrc. Override it for one run with /ship <stage> or make ship STAGE=<stage>."
     case "$1" in

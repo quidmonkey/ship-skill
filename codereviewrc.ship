@@ -20,6 +20,17 @@ ship_fix_retries=1
 # `make ship-stage STAGE=<stage>` rewrites this line.
 ship_stage=open_pr
 
+# Command run in a new ship worktree before the review, so the fixer and the
+# repo's hooks have its dependencies. Defaults to uv sync -q when the repo has
+# a pyproject.toml, otherwise nothing. e.g. npm ci
+# ship_setup=
+
+# Repos without their own review tooling only (the ship skill runs its own
+# code-review.sh): commands the review's fix agent runs to check its work,
+# separated by ;. Defaults to uv run pre-commit;uv run pytest with a
+# pyproject.toml, otherwise none. e.g. npm run lint;npm test
+# fix_checks=
+
 # Days to keep finished ship logs in .git/ship/; 0 keeps them forever.
 ship_log_retention_days=30
 

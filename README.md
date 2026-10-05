@@ -8,43 +8,65 @@ A Claude Code skill that ships a branch in the background. `/ship` reviews the b
 git clone git@github.com:quidmonkey/ship-skill.git ~/.claude/skills/ship
 ```
 
-You rarely need to run this yourself. The [scaffold skill](https://github.com/quidmonkey/scaffold-skill) clones it when it creates a project, and a scaffolded project's `make setup` clones it on a teammate's machine. To update, run `git -C ~/.claude/skills/ship pull`.
+The [scaffold skill](https://github.com/quidmonkey/scaffold-skill) clones it when it creates a project, and a scaffolded project's `make setup` clones it on a teammate's machine. To update, run `git -C ~/.claude/skills/ship pull`.
 
-## What a project needs
+Then add these rules to `~/.claude/settings.json`, so starting a ship always shows a permission prompt and the read-only calls don't:
 
-The skill holds the ship pipeline. The project holds the review half, which the scaffold skill writes:
+```json
+"allow": [
+  "Bash(bash *.claude/skills/ship/scripts/ship.sh --plan*)",
+  "Bash(bash *.claude/skills/ship/scripts/ship.sh --status*)",
+  "Bash(bash *.claude/skills/ship/scripts/ship.sh --watch*)"
+],
+"ask": [
+  "Bash(bash *.claude/skills/ship/scripts/ship.sh --detach*)",
+  "Bash(bash *.claude/skills/ship/scripts/ship.sh --yes*)",
+  "Bash(make ship)",
+  "Bash(make ship *)"
+]
+```
 
-- `scripts/code-review.sh`, installed as the pre-push hook. A ship pushes from its worktree, and this hook reviews that push.
-- `scripts/decisions.sh`, which the PR description and squash message use.
-- `scripts/lib/common.sh`, the shared config and review-ledger helpers. Its `ship_contract` value has to match the one in `scripts/lib/ship-config.sh`. A mismatch stops the ship with a message saying which side to update.
-- A `Makefile` that includes `ship.mk`, and `ask` permission rules for `make ship`.
+The `ask` rule is the confirmation step. Without it, a session in auto mode can start a ship with no prompt.
 
-### Adding /ship to a project
+## What a repo needs
 
-For a repo the scaffold skill didn't create:
+A git repo with an `origin` remote, a feature branch checked out, and an `origin/develop` (or the branch you target). Nothing has to be copied into it. The `claude` and `git` CLIs have to be on PATH, plus `gh` or `az` from `open_pr` on, and `uv` and `gcloud` for `verify_deploy`.
 
-1. Copy `scripts/code-review.sh`, `scripts/decisions.sh` and `scripts/lib/common.sh` from the scaffold skill's `templates/`, and add the code-review pre-push hook from its `templates/pre-commit-config.yaml`.
-2. Add this to the `Makefile`, after its first target:
+Where the review comes from depends on the repo:
 
-   ```make
-   SHIP_SKILL ?= $(HOME)/.claude/skills/ship
-   -include $(SHIP_SKILL)/ship.mk
-   ```
+- **Any repo.** `ship.sh` runs this skill's `scripts/code-review.sh` in the ship worktree before each push. The push then runs the repo's own hooks, if it has any. The review reads `CLAUDE.md` and `docs/` when they exist and works without them.
+- **A repo the scaffold skill created.** Its `scripts/lib/common.sh` sets `ship_contract`, and its pre-push hook runs its own `scripts/code-review.sh` on every push, so `ship.sh` relies on the hook and doesn't review twice. The `ship_contract` value has to match the one in `scripts/lib/ship-config.sh`. A mismatch stops the ship with a message saying which side to update. A `scripts/lib/common.sh` without `ship_contract` is treated as unrelated, and the skill's review runs.
 
-3. Append `codereviewrc.ship` to `.codereviewrc`, and gitignore `.codereviewrc`. Every key has a built-in default, so this step only documents the settings.
-4. Add `Bash(make ship)`, `Bash(make ship *)`, `Bash(bash *.claude/skills/ship/scripts/ship.sh*)` and `Bash(*.claude/skills/ship/scripts/ship.sh*)` to `ask` in `.claude/settings.json`.
-5. Run `/ship push` once. Preflight lists anything still missing.
+The decision trailers in the PR description come from the repo's `scripts/decisions.sh` when it has one, and from this skill's copy otherwise.
 
-A repo whose default branch is still `main` works too. `ship.sh` bases the first review on `develop` either way.
+`ship.sh` writes review reports to `working/` and personal settings to `.codereviewrc`. When the repo doesn't already ignore them, it adds both to `.git/info/exclude`, which stays local and is never committed, so neither ends up in an auto-fix commit.
+
+Two settings depend on the repo's language. `ship_setup` is the command run in a new worktree before the review; it defaults to `uv sync -q` when there's a `pyproject.toml`, and to nothing otherwise. `fix_checks` lists the lint and test commands the review's fixer runs to check its work; it defaults to `uv run pre-commit;uv run pytest` with a `pyproject.toml`, and to none otherwise. For a Node repo, for example:
+
+```
+ship_setup=npm ci
+fix_checks=npm run lint;npm test
+```
+
+### make targets
+
+`make ship` and the other targets in this README come from `ship.mk`. A scaffolded project's `Makefile` includes it. To use them in another repo, add this after the `Makefile`'s first target:
+
+```make
+SHIP_SKILL ?= $(HOME)/.claude/skills/ship
+-include $(SHIP_SKILL)/ship.mk
+```
+
+Without a `Makefile`, call the script directly: `bash ~/.claude/skills/ship/scripts/ship.sh --plan --stage push` plans a ship, and `--help` lists the rest. `/ship` in a session always calls the script directly.
 
 ## Shipping a branch
 
 Run `/ship` in a Claude Code session, or `make ship` in a terminal. The ship runs from its own git worktree, so you can keep editing while it works.
 
 1. A read-only plan prints the resolved settings, each tagged with where its value came from, and checks everything the stage needs: CLI logins, reviewers, the deploy target. Nothing is created yet.
-2. You confirm. In a session that's the permission prompt on `make ship`. In a terminal it's `Proceed? [y/N]`. Denying leaves everything as it was.
+2. You confirm. In a session that's the permission prompt on `ship.sh --detach`. In a terminal it's `Proceed? [y/N]`. Denying leaves everything as it was.
 3. The commit at HEAD is frozen as the branch `ship/<branch>-<sha7>` (`ship/<target>/<branch>-<sha7>` when the target isn't `develop`), checked out in a new worktree at `../<repo>.ship-<id>`. Commits you make afterwards don't join this ship.
-4. The worktree pushes the snapshot branch, which runs the pre-push review there. If the auto-fix clears every REQUIRED finding, the ship commits the fix and pushes again, up to `ship_fix_retries` times. If REQUIRED findings are still open, the ship fails and the report is copied to `.git/ship/<id>/code-review-report.md`.
+4. The worktree runs `ship_setup`, then reviews and pushes the snapshot branch (see [What a repo needs](#what-a-repo-needs) for which review runs). If the auto-fix clears every REQUIRED finding, the ship commits the fix and pushes again, up to `ship_fix_retries` times. If REQUIRED findings are still open, the ship fails and the report is copied to `.git/ship/<id>/code-review-report.md`.
 5. The ship then goes as far as `ship_stage`. Each stage includes the ones before it.
 
 | Stage | What runs |
@@ -91,7 +113,7 @@ Any `.codereviewrc` key can be changed for one run without editing the file. Hig
 3. `.codereviewrc`.
 4. The built-in default.
 
-An unknown key fails the plan and names the closest known one. An empty value means the default. Plain `git push` honors `CR_*` too, so `CR_REVIEW_MODEL=sonnet git push` works. Overrides are never written back; `make ship-stage` is the one command that edits the file.
+An unknown key fails the plan and names the closest known one. An empty value means the default. In a scaffolded repo, plain `git push` honors `CR_*` too, so `CR_REVIEW_MODEL=sonnet git push` works. Overrides are never written back; `make ship-stage` is the one command that edits the file.
 
 ### Deploy verification
 
@@ -106,6 +128,8 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 | Key | Values | Default |
 |-----|--------|---------|
 | `ship_stage` | `push`, `open_pr`, `merge`, `verify_deploy` | `open_pr` |
+| `ship_setup` | command run in a new worktree before the review | `uv sync -q` with a `pyproject.toml`, else none |
+| `fix_checks` | `;`-separated lint and test commands the fixer runs (skill review only) | `uv run pre-commit;uv run pytest` with a `pyproject.toml`, else none |
 | `ship_fix_retries` | times one ship commits an auto-fix and pushes again | `1` |
 | `ship_log_retention_days` | days to keep finished ship logs; `0` keeps them | `30` |
 | `ship_notify` | `none`, `desktop` (desktop notification on macOS, Windows or Linux when a ship passes, fails or stops) | `none` |
@@ -123,7 +147,7 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 | `deploy_smoke` | smoke test command | none |
 | `deploy_run_grace` / `deploy_poll_timeout` / `deploy_smoke_timeout` | seconds | `300` / `3600` / `900` |
 
-`.codereviewrc` is gitignored and personal to your machine. How far your ships go is your call, and it shouldn't change for a teammate because they pulled a commit. Every default is built into the scripts, so a clone with no `.codereviewrc` behaves like the scaffolded file. A file that still has the old `pr_automation` key and no `ship_stage` is read as `merge` (true) or `push` (false), with a notice.
+`.codereviewrc` is kept out of git and is personal to your machine. How far your ships go is your call, and it shouldn't change for a teammate because they pulled a commit. Every default is built into the scripts, so a clone with no `.codereviewrc` behaves like the scaffolded file. A file that still has the old `pr_automation` key and no `ship_stage` is read as `merge` (true) or `push` (false), with a notice.
 
 ### Squash merges and decisions
 
@@ -135,11 +159,13 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 |---|---|
 | `SKILL.md` | The `/ship` skill |
 | `scripts/ship.sh` | Plans and runs one ship |
-| `scripts/lib/ship-config.sh` | Loads the project's `common.sh`, checks `ship_contract`, adds the ship keys and defaults |
+| `scripts/lib/ship-config.sh` | Picks the project's review tooling or this skill's, checks `ship_contract`, adds the ship keys and defaults |
+| `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` | The review, decision trailers and shared helpers, used in repos without their own. Copies of the scaffold skill's templates, with `fix_checks` added |
 | `scripts/lib/ship-status.sh`, `scripts/lib/ship-deploy.sh` | Status and event helpers; deploy verification |
 | `scripts/set-ship-stage.sh` | Writes `ship_stage` into the project's `.codereviewrc` |
 | `ship.mk` | The `make ship*` targets a project includes |
 | `codereviewrc.ship` | The ship section of `.codereviewrc` |
 | `docs/spec.md` | The design spec |
+| `tests/e2e.sh` | End-to-end checks up to the push stage, in throwaway repos: `bash tests/e2e.sh` |
 
 The `version` in `SKILL.md` follows semver. The scaffold skill names the minimum version it needs and asks before pulling a newer one.

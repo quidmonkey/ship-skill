@@ -1,14 +1,19 @@
 # Spec: /ship skill and background ship pipeline
 
-Status: built in scaffold skill version 3.0.0, and moved into this standalone skill (ship 1.0.0, scaffold 5.0.0). See [Packaging](#packaging) for the split. See [Implementation notes](#implementation-notes) for what the build added or settled. Deploy verification has been tested against stubbed `gh`, `gcloud` and `curl` only.
+Status: built in scaffold skill version 3.0.0, moved into this standalone skill (ship 1.0.0, scaffold 5.0.0), and made to work in any repo (ship 1.1.0). See [Packaging](#packaging) for the split. See [Implementation notes](#implementation-notes) for what the build added or settled. Deploy verification has been tested against stubbed `gh`, `gcloud` and `curl` only.
 
 ## Packaging
 
 The ship skill lives at `~/.claude/skills/ship` and is its own git repo (`git@github.com:quidmonkey/ship-skill.git`). Nothing from it is copied into a project. A project gets it in two ways: the scaffold skill clones it if it's missing (and checks its minimum version), and the project's `make setup` clones it if it's missing.
 
-The project keeps the review half of the pipeline, written by the scaffold skill: `scripts/code-review.sh` (the pre-push hook), `scripts/decisions.sh` and `scripts/lib/common.sh`. `common.sh` is the contract between the two repos. The ship skill sources it from the project root and uses `rc_*`, `ledger_*`, `with_timeout` and `autofix_marker`. It carries `ship_contract=1`, and `lib/ship-config.sh` refuses to run against any other value. The ship keys, their defaults (through the `rc_default_extra` hook in `rc_default`) and `ship_base` live in `lib/ship-config.sh`.
+The review tooling comes from one of two places, and `lib/ship-config.sh` picks it when it's sourced:
 
-The project's Makefile includes the skill's `ship.mk` for the `ship*` targets, and falls back to targets that say to run `make setup` when the skill is missing. The ship section of `.codereviewrc` comes from the skill's `codereviewrc.ship`, which the scaffold appends.
+- **Project.** A scaffolded repo keeps the review half of the pipeline, written by the scaffold skill: `scripts/code-review.sh` (the pre-push hook), `scripts/decisions.sh` and `scripts/lib/common.sh`. `common.sh` is the contract between the two repos. The ship skill sources it from the project root and uses `rc_*`, `ledger_*`, `with_timeout` and `autofix_marker`. It carries `ship_contract=1`, and `lib/ship-config.sh` refuses to run against any other value. The pre-push hook is the review.
+- **Skill.** Any other repo, including one whose `scripts/lib/common.sh` has no `ship_contract` line. The skill sources its own `scripts/lib/common.sh` and runs its own `scripts/code-review.sh` in the worktree before each push. Both are copies of the scaffold skill's templates. The review copy adds `fix_checks`, the lint and test commands its fixer may run, in place of the template's fixed `uv run pytest`, `uv run pre-commit` and `make run-check`.
+
+`scripts/decisions.sh` comes from the project when it has one and from the skill otherwise. The ship keys, their defaults (through the `rc_default_extra` hook in `rc_default`) and `ship_base` live in `lib/ship-config.sh`.
+
+A project's Makefile can include the skill's `ship.mk` for the `ship*` targets; a scaffolded one does, and falls back to targets that say to run `make setup` when the skill is missing. `/ship` doesn't need them: it calls `scripts/ship.sh` directly. The ship section of `.codereviewrc` comes from the skill's `codereviewrc.ship`, which the scaffold appends.
 
 ## Goal
 
@@ -37,7 +42,7 @@ The new design moves all of it into a separate git worktree, so none of it touch
 - Repos the scaffold didn't create get the ship pipeline through a documented manual install.
 - Writes to the review ledger are locked, and a branch and commit can't be shipped twice at the same time.
 - Every `.codereviewrc` setting can be overridden for one run with `--set key=value` (or `SET=` from make) or a `CR_<KEY>` environment variable.
-- Every ship starts with a read-only plan that shows the config. There's exactly one confirmation: the permission prompt on `make ship`. Nothing runs until the developer approves it, and denying it leaves everything as it was. The one exception to a single prompt is `open_pr` without named reviewers: the skill asks for reviewers before the plan.
+- Every ship starts with a read-only plan that shows the config. There's exactly one confirmation: the permission prompt on `ship.sh --detach` (or `make ship` from a terminal). Nothing runs until the developer approves it, and denying it leaves everything as it was. The one exception to a single prompt is `open_pr` without named reviewers: the skill asks for reviewers before the plan.
 
 ## Stages
 
@@ -59,16 +64,18 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 |---|---|
 | `SKILL.md` (this skill) | The `/ship` skill: kickoff, status, stop, and stage notifications |
 | `scripts/ship.sh` (this skill) | Orchestrates one ship: plan, preflight, worktree, stages. `--plan` prints the config block and creates nothing. Runs in the foreground by default, or `--detach` for the background. `--status`, `--stop` and `--watch` wrap the status helpers |
-| `scripts/lib/ship-config.sh` (this skill) | Sources the project's `common.sh`, checks `ship_contract`, adds the ship keys and their defaults, sets `ship_base` |
+| `scripts/lib/ship-config.sh` (this skill) | Picks the project's tooling or the skill's (see Packaging), checks `ship_contract`, adds the ship keys and their defaults, sets `ship_base`, and adds `working/` and `.codereviewrc` to `.git/info/exclude` when nothing ignores them |
+| `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` (this skill) | The review tooling for repos without their own |
+| `tests/e2e.sh` (this skill) | End-to-end checks up to the push stage in throwaway repos, with stubbed review and fix agents |
 | `scripts/lib/ship-status.sh` (this skill) | Status, event and log helpers, retention pruning, and the status, stop and watch commands |
 | `scripts/lib/ship-deploy.sh` (this skill) | Deploy verification: find the run, health check, smoke test |
 | `scripts/set-ship-stage.sh` (this skill) | Writes `ship_stage` into the project's `.codereviewrc` |
 | `ship.mk` (this skill) | `make ship [STAGE=..] [SET=..] [DETACH=1] [YES=1]`, `make ship-plan [STAGE=..] [SET=..]`, `make ship-stage STAGE=..`, `make ship-status [ID=..]`, `make ship-watch [ID=..]`, `make ship-stop [ID=..]`; `make auto-pr` is an alias for `make ship-stage STAGE=merge` |
 | `codereviewrc.ship` (this skill) | The ship section of `.codereviewrc` (see Configuration) |
-| `scripts/lib/common.sh` (project) | `rc_get` checks the `CR_<KEY>` environment variable before `.codereviewrc` (see Overrides); the review keys; the ledger; `ship_contract` |
-| `scripts/code-review.sh` (project) | The pre-push review. Honors `REVIEW_BASE_BRANCH` for a branch's first review (see Review base) |
-| `Makefile` (project) | Includes `ship.mk`; `make setup` clones this skill if it's missing |
-| `.claude/settings.json` (project) | `ask` rules for `Bash(make ship)`, `Bash(make ship *)` and direct calls to this skill's `ship.sh`. `make ship-plan`, `ship-status`, `ship-watch` and `ship-stop` stay under the `Bash(make *)` allow rule; `make ship *` doesn't match them |
+| `scripts/lib/common.sh` (project, optional) | `rc_get` checks the `CR_<KEY>` environment variable before `.codereviewrc` (see Overrides); the review keys; the ledger; `ship_contract` |
+| `scripts/code-review.sh` (project, optional) | The pre-push review. Honors `REVIEW_BASE_BRANCH` for a branch's first review (see Review base) |
+| `Makefile` (project, optional) | Includes `ship.mk`; `make setup` clones this skill if it's missing |
+| `~/.claude/settings.json` (user) | `ask` rules for `ship.sh --detach`, `ship.sh --yes`, `make ship` and `make ship *`; `allow` rules for `ship.sh --plan`, `--status` and `--watch`. A scaffolded project's `.claude/settings.json` carries the `make ship` rules too |
 
 ## Flow
 
@@ -87,13 +94,13 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 - **Use configured: <list>**, shown only when `.codereviewrc` or `CR_PR_REVIEWERS` has a value
 - **Other**, a free-text list of emails or teams
 
-The answer becomes `SET='pr_reviewers=...'` for the plan, so preflight checks the names and the config block shows them. The question is skipped at every other stage, and whenever the invocation already names reviewers (`/ship pr_reviewers=...` or "ship it and have Jane review"). `make ship` in a terminal never asks: it uses the configured value or `SET`.
+The answer becomes `--sets 'pr_reviewers=...'` for the plan, so preflight checks the names and the config block shows them. The question is skipped at every other stage, and whenever the invocation already names reviewers (`/ship pr_reviewers=...` or "ship it and have Jane review"). `make ship` in a terminal never asks: it uses the configured value or `SET`.
 
 This question collects input. It doesn't replace the confirmation, which is still the single permission prompt below.
 
 Then the developer confirms:
 
-- **`/ship`:** the skill posts the config block, then runs step 5 with the planned ID and SHA. That command hits the `ask` permission rule on `make ship`, so the Claude Code permission prompt is the only confirmation. The skill doesn't ask a question of its own. Approving starts the ship. Denying cancels it: the skill replies "Ship cancelled, nothing was created" and runs nothing else. The agent can't start a ship without that prompt, even outside the skill, because the `ask` rule is in project settings and outranks any `allow` rule. The one exception is a session running in bypass-permissions mode, which skips every prompt.
+- **`/ship`:** the skill posts the config block, then runs step 5 with the planned ID and SHA. That command, `ship.sh --detach ...`, hits the user-level `ask` permission rule, so the Claude Code permission prompt is the only confirmation. The skill doesn't ask a question of its own. Approving starts the ship. Denying cancels it: the skill replies "Ship cancelled, nothing was created" and runs nothing else. The agent can't start a ship without that prompt, even outside the skill, because an `ask` rule outranks any `allow` rule. The one exception is a session running in bypass-permissions mode, which skips every prompt.
 - **`make ship` in a terminal:** the script prints the block and asks `Proceed? [y/N]`. Anything but `y` exits 0 with nothing created. Without a terminal, `make ship` refuses to run unless `YES=1` is set.
 - **Preflight failures:** the block is still shown, but there's no proceed option. The skill lists the fixes instead.
 
@@ -102,7 +109,7 @@ Then the developer confirms:
 5. Run `ship.sh --id <id> --expect-sha <sha> --expect-config <hash>` with the same overrides the plan had. The plan prints `<hash>`, a hash of every resolved setting. If HEAD has moved since the plan, any setting now resolves differently, or a check that passed in the plan now fails, refuse, and tell the developer to run `/ship` again. That way the developer never approves one config and gets another.
 6. Prune expired ship directories (see Retention).
 7. Create the snapshot branch `ship/<branch>-<sha7>` at HEAD, or `ship/<target>/<branch>-<sha7>` for a target other than `develop`, so one commit shipped to two targets gets two branches. Seed its ledger entry in `.git/code-review-ledger` from the source branch's entry, so commits already reviewed aren't reviewed again. The write takes the ledger lock (see Concurrency).
-8. Create the worktree at `../<repo>.ship-<id>` on the snapshot branch. Copy `.codereviewrc` into it, since the file is gitignored. Create `working/`. Run `uv sync`.
+8. Create the worktree at `../<repo>.ship-<id>` on the snapshot branch. Copy `.codereviewrc` into it, since the file is ignored. Create `working/`. Run `ship_setup` (`uv sync -q` by default when the repo has a `pyproject.toml`). Before the worktree is created, `working/` and `.codereviewrc` go into `.git/info/exclude` if nothing ignores them, so the auto-fix commit can't pick them up.
 9. Create `.git/ship/<id>/`. Write the config block to `status.json` and to the top of `ship.log`. Point `.git/ship/latest` at the new directory.
 10. With `--detach`: re-launch the rest under `nohup`, write `pid`, print the ship ID, and exit 0. Without it, continue in the foreground and stream `ship.log`.
 
@@ -110,7 +117,7 @@ The snapshot freezes the commit being shipped. Later commits on the developer's 
 
 ### 3. Review, fix, push (in the worktree)
 
-1. Run `git push -u origin <snapshot>`. The existing pre-push hook runs the two-pass review in the worktree.
+1. Review, then push. With the skill's tooling, run its `code-review.sh` in the worktree, then `git push -u origin <snapshot>`, which runs the repo's own hooks. With the project's tooling, `git push` alone: the pre-push hook runs the two-pass review.
 2. If the push is blocked and the fix loop left `working/autofix-pending.marker`, commit the fix automatically with the existing message and push again, up to `ship_fix_retries` times. There's no confirmation prompt: the working tree belongs to the ship, and the re-push runs the full review again.
 3. If the push is blocked with REQUIRED findings still open, copy `working/code-review-report.md` into the ship directory, set the state to `failed`, and keep the worktree for inspection.
 
@@ -178,7 +185,8 @@ Preflight runs every check the resolved stage needs, before anything is created 
 | Check | Stages |
 |---|---|
 | On a feature branch with commits ahead of `origin/develop`; `origin/develop` exists | all |
-| `claude`, `uv` and `git` are on PATH; the pre-push hook is installed | all |
+| `claude` and `git` are on PATH, and `uv` when `ship_setup` starts with it; with the project's tooling, the pre-push hook is installed | all |
+| `uv` is on PATH | `verify_deploy` |
 | `.codereviewrc` values are valid: the stage is a known value, numbers are integers | all |
 | `gh auth status`, or `az account show` plus the `azure-devops` extension with org and project defaults set | `open_pr` and up |
 | Every `pr_reviewers` entry resolves to a real user or team (`gh api users/<name>` or `gh api orgs/<org>/teams/<team>`; `az devops user show --user <email>` or a team lookup) | `open_pr` and up, when set |
@@ -244,11 +252,11 @@ Rules:
 - **Values are validated the same way no matter where they come from.** An invalid override fails preflight exactly as a bad `.codereviewrc` value would.
 - **Empty means default.** `--set review_model=` or `CR_REVIEW_MODEL=` falls back to the built-in default, not to `.codereviewrc`.
 - **Overrides reach the review.** `ship.sh` exports each resolved `--set` value as `CR_<KEY>` before pushing, so the pre-push `code-review.sh` in the worktree sees it. The worktree's copy of `.codereviewrc` isn't edited.
-- **Plain `git push` honors `CR_*` too**, because `rc_get` in `common.sh` checks the environment first. `CR_REVIEW_MODEL=sonnet git push` works without `make ship`.
+- **Plain `git push` honors `CR_*` too** in a scaffolded repo, because `rc_get` in `common.sh` checks the environment first. `CR_REVIEW_MODEL=sonnet git push` works without `make ship`.
 - **Values with spaces work.** For example, `SET='deploy_name=Brady Sales Agent (dev)'`. A value that itself contains `;` has to be set through `CR_<KEY>` or `.codereviewrc`.
 - **Overrides are per run.** They're never written back to `.codereviewrc`. To change a setting permanently, edit the file or use `make ship-stage`.
 
-The skill always passes overrides as `SET=...`, never as environment variables. That keeps them visible in the command shown in the permission prompt, and it keeps the command matching the `make ship *` ask rule.
+The skill always passes overrides as `--sets ...`, never as environment variables. That keeps them visible in the command shown in the permission prompt, and it keeps the command matching the `ship.sh --detach` ask rule.
 
 ## Retention
 
@@ -262,7 +270,7 @@ The skill file is `~/.claude/skills/ship/SKILL.md`, a user-level skill.
 
 | Command | What it does |
 |---|---|
-| `/ship [stage] [key=value ...]` | If the stage is `open_pr` and no reviewers were given, asks for reviewers first (see Plan and confirm). Runs `make ship-plan [STAGE=<stage>] [SET=...]` and posts the config block. If preflight passed, runs `make ship DETACH=1 YES=1 ID=<id> SHA=<sha> CONFIG=<hash>` with the same `STAGE` and `SET`. Plain-language requests map to `SET` too: "ship it with sonnet for the review" becomes `SET='review_model=sonnet'`. After a denied prompt, a follow-up like "same, but with `review_effort=max`" starts a fresh plan with the previous overrides plus the new one. The `ask` permission prompt on that command is the single confirmation. If it's denied, the skill reports the ship was cancelled and stops. If it's approved, the skill starts a Monitor on the ship's `events` file and posts one line per event. At the end, posts a summary. On failure, it reads the copied review report or `ship.log` and explains what went wrong and how to fix it |
+| `/ship [stage] [key=value ...]` | If the stage is `open_pr` and no reviewers were given, asks for reviewers first (see Plan and confirm). Runs `ship.sh --plan [--stage <stage>] [--sets ...]` and posts the config block. If preflight passed, runs `ship.sh --detach --yes --id <id> --expect-sha <sha> --expect-config <hash>` with the same `--stage` and `--sets`. Plain-language requests map to `--sets` too: "ship it with sonnet for the review" becomes `--sets 'review_model=sonnet'`. After a denied prompt, a follow-up like "same, but with `review_effort=max`" starts a fresh plan with the previous overrides plus the new one. The `ask` permission prompt on that command is the single confirmation. If it's denied, the skill reports the ship was cancelled and stops. If it's approved, the skill starts a Monitor on the ship's `events` file and posts one line per event. At the end, posts a summary. On failure, it reads the copied review report or `ship.log` and explains what went wrong and how to fix it |
 | `/ship status [id]` | Summarizes every running ship and the last few finished ones from their `status.json` files |
 | `/ship stop [id]` | Kills the background process, sets the state to `stopped`, and reports anything left behind: an open PR, armed auto-complete, the worktree |
 
@@ -282,7 +290,7 @@ Ships of different branches, or of different commits on one branch, run side by 
 
 ## Configuration
 
-These are the new and changed keys in `.codereviewrc`, which stays gitignored and per-developer.
+These are the new and changed keys in `.codereviewrc`, which stays out of git and per-developer.
 
 ```
 # How far /ship and make ship go after review and push:
@@ -335,7 +343,7 @@ The existing keys stay: `pr_host`, `pr_merge_method`, `pr_self_approve`, `pr_pol
 
 ## Existing repos
 
-For repos the scaffold didn't create, this skill's `README.md` documents a manual install: copy the review tooling from the scaffold skill's templates (`scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh`, and the pre-push hook in `.pre-commit-config.yaml`), include `ship.mk` from the Makefile, append `codereviewrc.ship` to `.codereviewrc`, and add the `ask` rules. `/ship push` then works as a dry run: preflight lists anything still missing.
+Any repo works without setup: the skill's own review tooling runs (see Packaging). A repo can still copy the scaffold's tooling and include `ship.mk` to get the pre-push hook and the `make` targets. `/ship push` works as a dry run: preflight lists anything missing.
 
 ## Example: Brady.Adk.SalesAgent
 
@@ -377,15 +385,15 @@ GitHub doesn't let you approve your own PR, so with self-approve the merge still
 
 Decisions the build made where the draft was silent, and additions to it.
 
-- **Reviewer question.** The skill learns the resolved stage and configured reviewers from a first `make ship-plan` run, asks, then plans again with `pr_reviewers` in `SET`. The plan is read-only, so running it twice costs a few seconds. "No reviewers" passes `pr_reviewers=` so configured reviewers are cleared for that run.
+- **Reviewer question.** The skill learns the resolved stage and configured reviewers from a first `ship.sh --plan` run, asks, then plans again with `pr_reviewers` in `--sets`. The plan is read-only, so running it twice costs a few seconds. "No reviewers" passes `pr_reviewers=` so configured reviewers are cleared for that run.
 - **Plan output.** The block ends with `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=passed|failed` lines for the skill to read. The config hash is the first 12 characters of `git hash-object` over every resolved `key=value`.
 - **Watching.** `ship.sh --watch [id]` (`make ship-watch`) prints each event as `<stage> <state>: <message>` and exits when the ship finishes (0 on passed), or when its process dies without finishing. The skill runs it under a Monitor. The finish event is written before `finished_at`, so a watcher that stops at `finished_at` has always seen it.
-- **Event stages.** Events use `kickoff`, `push` (which covers the review, since the review runs inside `git push`), `open_pr`, `merge`, `verify_deploy` and `finish`.
+- **Event stages.** Events use `kickoff`, `push` (which covers the review and the push), `open_pr`, `merge`, `verify_deploy` and `finish`.
 - **Stop.** `ship_stop` collects the ship's descendant processes before sending TERM to `ship.sh`, since they can't be found from its PID once it exits, then sends TERM to them too (the push, the review agents, the smoke test). `ship.sh` records `stopped` from its TERM trap. If it hasn't within 15 seconds, the stop command kills it and records the state itself. With no ID and more than one ship running, it lists them and asks for one.
 - **Foreground ships** write `pid` too, so duplicate detection and `/ship stop` work for them.
 - **Re-shipping a failed commit.** The snapshot branch name is fixed by the commit, so a failed or stopped ship's kept branch would block a second ship of the same commit. Preflight warns that the new ship replaces them, and kickoff removes that worktree and branch (keeping its logs). A `ship/*` branch no ship owns fails preflight. So does a snapshot branch already on `origin`: an earlier ship of the same commit pushed it, and pushing again is rejected if that ship committed an auto-fix. Preflight names the branch to delete once its PR is merged or closed.
 - **Ledger.** A passed or pruned ship's snapshot entry is removed from the ledger, so it doesn't grow by one line per ship. `ledger_set <branch> ""` deletes an entry.
-- **Detached runner.** The background process runs this skill's `scripts/ship.sh` from the ship's worktree, so it sources the snapshot's own `scripts/lib/common.sh` and `scripts/decisions.sh`. A `git pull` in the skill while a ship runs changes the code under it; that's accepted. It inherits the exported `CR_*` overrides, and reads everything else from `status.json`.
+- **Detached runner.** The background process runs this skill's `scripts/ship.sh` from the ship's worktree, so with the project's tooling it sources the snapshot's own `scripts/lib/common.sh` and `scripts/decisions.sh`. A `git pull` in the skill while a ship runs changes the code under it; that's accepted. It inherits the exported `CR_*` overrides, and reads everything else from `status.json`.
 - **Makefile variables** (`STAGE`, `SET`, `ID`, `SHA`, `CONFIG`, `DETACH`, `YES`) are read only when their `$(origin)` is `command line`, so a stray `YES=1` in the environment can't skip the terminal prompt. `SET` and `STAGE` reach `ship.sh` through the shell (`"$SET"`), so values with spaces and parentheses survive.
 - **Deploy polling** reuses `pr_poll_interval` between polls; there's no separate key.
 - **JSON parsing.** `status.json` is written one `"key": "value"` per line with the config object last, so the scripts read and update it with `sed` and `awk`. gcloud and Vertex AI responses are parsed with `uv run --no-project python`, so the plan never syncs the project env and nothing needs `jq`.

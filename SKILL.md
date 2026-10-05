@@ -1,6 +1,6 @@
 ---
 name: ship
-version: 1.0.0
+version: 1.1.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and verify the dev deploy, as far as the
@@ -14,7 +14,7 @@ description: |
 
 This skill's `scripts/ship.sh` does the work in its own git worktree, so the developer keeps editing while it runs. This skill plans the ship, starts it, and relays its progress. This skill's `README.md` documents the stages and settings.
 
-The project supplies the rest: the `make ship*` targets (its `Makefile` includes this skill's `ship.mk`), the pre-push review, `scripts/decisions.sh` and `scripts/lib/common.sh`, all written by the scaffold skill. If `make ship-plan` says there's no rule for the target, or `ship.sh` reports a missing `common.sh` or a `ship_contract` mismatch, relay the error and point at "Adding /ship to a project" in this skill's `README.md`. Don't work around it.
+It works in any git repo with an `origin` remote. Run every command below from the repo, with the script at `~/.claude/skills/ship/scripts/ship.sh`, written exactly as shown so the permission rules match. A repo the scaffold skill created reviews each push with its own pre-push hook; any other repo is reviewed by this skill's `scripts/code-review.sh`, which `ship.sh` runs before the push. If `ship.sh` reports a `ship_contract` mismatch, relay the error and its fix. Don't work around it.
 
 Decision trailers on the branch's commits (the project's `README.md`, "Decision history") are copied into the PR description, and into the squash commit message when the merge stage squashes, so they survive the merge. `ship.sh` does this; nothing in this skill needs to.
 
@@ -22,42 +22,42 @@ Decision trailers on the branch's commits (the project's `README.md`, "Decision 
 |---|---|
 | `/ship [branch] [stage] [key=value ...]` | Plan, confirm through the permission prompt, start, and report each stage. `branch` is the target, default `develop` |
 | `/ship main` (or `master`) | A prod release of `develop` into it; see "Prod release" below |
-| `/ship status [id]` | `make ship-status [ID=<id>]`, summarized |
-| `/ship stop [id]` | `make ship-stop [ID=<id>]`, and report what it left behind |
+| `/ship status [id]` | `bash ~/.claude/skills/ship/scripts/ship.sh --status [<id>]`, summarized |
+| `/ship stop [id]` | `bash ~/.claude/skills/ship/scripts/ship.sh --stop [<id>]`, and report what it left behind |
 
 Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A feature ship targets `develop` unless the invocation names another branch. The only way into `main` or `master` is a prod release.
 
 ## Rules
 
-- Start a ship only with the exact `make ship ...` command from step 5. Never run `ship.sh` directly, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
-- The permission prompt on `make ship` is the only confirmation. Don't ask "shall I proceed?" before it.
-- Pass overrides only as `BRANCH=`, `STAGE=`, `SET=` and `NOTES=` on the make command, never as environment variables, so they show in the prompt.
+- Start a ship only with the exact `ship.sh --detach ...` command from step 5. Run `ship.sh` only in the forms shown here, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
+- The permission prompt on `ship.sh --detach` is the only confirmation. Don't ask "shall I proceed?" before it.
+- Pass overrides only as `--target`, `--stage`, `--sets` and `--notes-file` arguments, never as environment variables, so they show in the prompt.
 - Never edit `.codereviewrc` for a one-run change, and never set `SKIP_CODE_REVIEW`.
 
 ## Kickoff
 
 ### 1. Build the overrides
 
-- A branch name (any word that isn't a stage or `key=value`) becomes `BRANCH=<branch>`. Omit it for `develop`. `main` or `master` makes this a prod release: go to "Prod release" instead of continuing here.
-- A stage word becomes `STAGE=<stage>`.
-- Each `key=value` becomes an entry in `SET`, joined with `;`: `SET='review_model=sonnet;pr_reviewers=alice'`.
+- A branch name (any word that isn't a stage or `key=value`) becomes `--target <branch>`. Omit it for `develop`. `main` or `master` makes this a prod release: go to "Prod release" instead of continuing here.
+- A stage word becomes `--stage <stage>`.
+- Each `key=value` becomes an entry in `--sets`, joined with `;`: `--sets 'review_model=sonnet;pr_reviewers=alice'`.
 - Plain language maps to keys: "use sonnet for the review" is `review_model=sonnet`, "have Jane review" is `pr_reviewers=<Jane's GitHub username, or email on ADO>`. If a name doesn't map to a handle you know, ask for it.
-- A value containing `'` or `;` can't go through `SET`. Ask the developer to put it in `.codereviewrc` instead.
+- A value containing `'` or `;` can't go through `--sets`. Ask the developer to put it in `.codereviewrc` instead.
 - After a denied prompt, a follow-up like "same, but with review_effort=max" keeps the previous overrides and adds the new one.
 
 ### 2. Plan
 
-Run `make ship-plan [BRANCH=...] [STAGE=...] [SET='...']`. It's read-only and prints the config block, then `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=` lines.
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan [--target ...] [--stage ...] [--sets '...']`. It's read-only and prints the config block, then `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=` lines.
 
 ### 3. Reviewers (open_pr only)
 
 If the block shows `ship_stage` as `open_pr` and the invocation didn't name reviewers, ask with `AskUserQuestion`, "Add reviewers to this PR?":
 
-- **No reviewers**: add `pr_reviewers=` to `SET`, so any configured reviewers are cleared for this run.
+- **No reviewers**: add `pr_reviewers=` to `--sets`, so any configured reviewers are cleared for this run.
 - **Use configured: <list>**: only when the block's `pr_reviewers` line has a value. Add nothing.
 - The automatic "Other" option takes a free-text list. Add `pr_reviewers=<list>` (comma-separated).
 
-If `SET` changed, run the plan again with it. Skip this step at every other stage and whenever the invocation already set `pr_reviewers`.
+If `--sets` changed, run the plan again with it. Skip this step at every other stage and whenever the invocation already set `pr_reviewers`.
 
 ### 4. Show the plan
 
@@ -67,10 +67,10 @@ If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with the fix it names and stop
 
 ### 5. Start
 
-Run exactly, with the same `BRANCH`, `STAGE`, `SET` and `NOTES` as the last plan:
+Run exactly, with the same `--target`, `--stage`, `--sets` and `--notes-file` as the last plan:
 
 ```
-make ship DETACH=1 YES=1 ID=<SHIP_ID> SHA=<SHIP_SHA> CONFIG=<SHIP_CONFIG> [BRANCH=...] [STAGE=...] [SET='...'] [NOTES=...]
+bash ~/.claude/skills/ship/scripts/ship.sh --detach --yes --id <SHIP_ID> --expect-sha <SHIP_SHA> --expect-config <SHIP_CONFIG> [--target ...] [--stage ...] [--sets '...'] [--notes-file ...]
 ```
 
 - **Prompt denied:** reply "Ship cancelled, nothing was created." and run nothing else.
@@ -79,7 +79,7 @@ make ship DETACH=1 YES=1 ID=<SHIP_ID> SHA=<SHIP_SHA> CONFIG=<SHIP_CONFIG> [BRANC
 
 ### 6. Follow it
 
-Start a Monitor on `make ship-watch ID=<id>`. It prints one line per stage transition, `<stage> <state>: <message>`, and exits when the ship finishes. Post each line as a short update. A `waiting` line names what the ship is blocked on (a required check, a review, a deploy approval); say so plainly.
+Start a Monitor on `bash ~/.claude/skills/ship/scripts/ship.sh --watch <id>`. It prints one line per stage transition, `<stage> <state>: <message>`, and exits when the ship finishes. Post each line as a short update. A `waiting` line names what the ship is blocked on (a required check, a review, a deploy approval); say so plainly.
 
 ### 7. Report
 
@@ -101,15 +101,15 @@ Ask both with one `AskUserQuestion` call:
 - "This is a prod deploy: open a PR merging develop into <branch>?" Options **Yes, prod release** and **No, cancel**.
 - "Self-approve and auto-merge into <branch> once its checks pass?" Options **No, a human approves and merges (Recommended)** and **Yes, self-approve and auto-merge**.
 
-If the first answer is no, reply "Ship cancelled, nothing was created." and stop. Otherwise the second sets the stage: no is `STAGE=open_pr`, yes is `STAGE=merge` and adds `pr_self_approve=true` to `SET`. A prod release ignores `ship_stage` from `.codereviewrc`, so always pass `STAGE`. On GitHub, approving your own PR isn't allowed, so with yes the merge still waits for any required human review; say so if the plan or the ship reports the self-approval was rejected.
+If the first answer is no, reply "Ship cancelled, nothing was created." and stop. Otherwise the second sets the stage: no is `--stage open_pr`, yes is `--stage merge` and adds `pr_self_approve=true` to `--sets`. A prod release ignores `ship_stage` from `.codereviewrc`, so always pass `--stage`. On GitHub, approving your own PR isn't allowed, so with yes the merge still waits for any required human review; say so if the plan or the ship reports the self-approval was rejected.
 
-Other `key=value` words from the invocation still go in `SET`.
+Other `key=value` words from the invocation still go in `--sets`.
 
 ### 2. Plan
 
-Run `make ship-plan BRANCH=<branch> STAGE=<stage> [SET='...']`. If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with its fix and stop. The plan fetches `develop` and `<branch>`, so `SHIP_SHA` is `origin/develop`'s current tip.
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan --target <branch> --stage <stage> [--sets '...']`. If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with its fix and stop. The plan fetches `develop` and `<branch>`, so `SHIP_SHA` is `origin/develop`'s current tip.
 
-With `STAGE=open_pr`, ask about reviewers as in Kickoff step 3; a prod PR that waits for a human is where they matter most.
+With `--stage open_pr`, ask about reviewers as in Kickoff step 3; a prod PR that waits for a human is where they matter most.
 
 ### 3. Draft the release notes
 
@@ -117,26 +117,26 @@ Read what's being released, using the `SHIP_SHA` from the plan:
 
 ```
 git log --no-merges --reverse --format='%h %s%n%b' origin/<branch>..<SHIP_SHA>
-scripts/decisions.sh --range origin/<branch>..<SHIP_SHA>
+bash ~/.claude/skills/ship/scripts/decisions.sh --range origin/<branch>..<SHIP_SHA>
 ```
 
-Write the notes to `working/release-notes.md`, for the people who read the prod PR:
+Write the notes to `<git-common-dir>/ship/release-notes.md`, where `<git-common-dir>` is what `git rev-parse --git-common-dir` prints (`.git` in a plain checkout), so they stay out of the working tree. Write them for the people who read the prod PR:
 
 - A one-line summary of the release.
 - `## Changes`: one bullet per user-visible change, in plain language, grouped under `### Added`, `### Changed` and `### Fixed` where that helps. Merge commits that belong to one change into one bullet. Leave out `Apply code review auto-fix` commits and anything with no visible effect.
 - `## Decisions`, only when the decisions output isn't empty: each recorded decision in a sentence.
 - Nothing else. Don't invent changes the commits don't show. `ship.sh` adds a footer naming the commit.
 
-Then run the plan again with `NOTES=working/release-notes.md` added. The notes are part of `SHIP_CONFIG`, so editing the file afterwards makes the start refuse.
+Then run the plan again with `--notes-file <that path>` added. The notes are part of `SHIP_CONFIG`, so editing the file afterwards makes the start refuse.
 
 ### 4. Show and start
 
-Post the notes, then the config block from the last plan, then run step 5 of Kickoff with `BRANCH`, `STAGE`, `SET` and `NOTES` exactly as planned. If the developer asks for changes to the notes, edit the file, plan again, and show both again. Follow the ship and report as in Kickoff steps 6 and 7.
+Post the notes, then the config block from the last plan, then run step 5 of Kickoff with `--target`, `--stage`, `--sets` and `--notes-file` exactly as planned. If the developer asks for changes to the notes, edit the file, plan again, and show both again. Follow the ship and report as in Kickoff steps 6 and 7.
 
 ## Status
 
-Run `make ship-status` (or `make ship-status ID=<id>`) and summarize each ship: stage, state, what it's waiting on, and its PR. A ship whose process is gone without finishing died unexpectedly; point at its log.
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --status` (or `--status <id>`) and summarize each ship: stage, state, what it's waiting on, and its PR. A ship whose process is gone without finishing died unexpectedly; point at its log.
 
 ## Stop
 
-Run `make ship-stop` (with `ID=<id>` when more than one ship is running; the command says so). Relay what it reports as left behind: an open PR, auto-merge still armed (it merges once checks pass unless cancelled on the PR), the kept worktree and snapshot branch.
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --stop` (with `<id>` after it when more than one ship is running; the command says so). Relay what it reports as left behind: an open PR, auto-merge still armed (it merges once checks pass unless cancelled on the PR), the kept worktree and snapshot branch.

@@ -447,13 +447,15 @@ preflight_feature() {
     [ -n "$(git status --porcelain)" ] \
         && pf_warn "Uncommitted changes in your checkout aren't part of this ship. Only commits up to $sha7 ship."
 
-    [ -f "$project_scripts/decisions.sh" ] \
-        || pf_fail "scripts/decisions.sh is missing; the PR description and squash message need it. Copy it from the scaffold skill's templates."
-    hook=$(git rev-parse --git-path hooks/pre-push)
-    if [ -f "$hook" ]; then
-        pf_ok "pre-push hook installed"
+    if [ "$review_tooling" = skill ]; then
+        pf_ok "review: the ship skill's code-review.sh runs before the push"
     else
-        pf_fail "The pre-push hook isn't installed, so nothing would review the push. Run: uv run pre-commit install"
+        hook=$(git rev-parse --git-path hooks/pre-push)
+        if [ -f "$hook" ]; then
+            pf_ok "review: the project's pre-push hook"
+        else
+            pf_fail "The pre-push hook isn't installed, so nothing would review the push. Run: uv run pre-commit install"
+        fi
     fi
     # Named for the target too, so shipping one commit to two targets doesn't
     # reuse a branch whose PR (or auto-fix commit) belongs to the other.
@@ -526,7 +528,7 @@ prod_pr_open() {
 }
 
 preflight() {
-    local t d owner open
+    local t d owner open tools="claude git"
     branch=""
     if $prod; then
         preflight_prod
@@ -534,7 +536,11 @@ preflight() {
         preflight_feature
     fi
 
-    for t in claude uv git; do
+    if ! $prod; then
+        case "$cfg_ship_setup" in uv | uv\ *) tools="$tools uv" ;; esac
+    fi
+    stage_at_least verify_deploy && tools="$tools uv"
+    for t in $tools; do
         command -v "$t" >/dev/null 2>&1 || pf_fail "$t isn't on PATH. Install it, then /ship again."
     done
 
@@ -590,9 +596,9 @@ setting_line() {
 
 print_block() {
     local key shown
-    shown="ship_stage pr_host pr_merge_method pr_self_approve pr_reviewers review_agent
+    shown="ship_stage ship_setup pr_host pr_merge_method pr_self_approve pr_reviewers review_agent
 review_model review_effort review_spec_model review_spec_effort fix_enabled
-fix_model fix_effort fix_max_iterations ship_fix_retries agent_timeout pr_poll_interval pr_poll_timeout"
+fix_model fix_effort fix_max_iterations $(in_list fix_checks "$rc_known_keys" && echo fix_checks) ship_fix_retries agent_timeout pr_poll_interval pr_poll_timeout"
     stage_at_least verify_deploy \
         && shown="$shown deploy_pipeline deploy_provider deploy_project deploy_region deploy_name
 deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout deploy_smoke_timeout"
@@ -606,6 +612,11 @@ deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout depl
         printf '  %-24s %s\n' snapshot "$snapshot"
         printf '  %-24s %s\n' worktree "$worktree"
         printf '  %-24s %s\n' target "$ship_base"
+        if [ "$review_tooling" = skill ]; then
+            printf '  %-24s %s\n' review "the ship skill's code-review.sh"
+        else
+            printf '  %-24s %s\n' review "the project's pre-push hook"
+        fi
     fi
     printf '  %-24s %s\n' log "$(ship_root)/$ship_id/ship.log"
     echo "Settings"
@@ -687,15 +698,30 @@ copy_report() {
     return 0
 }
 
+# review_push — reviews and pushes the snapshot. In a repo with the scaffold's
+# review tooling the pre-push hook is the review; otherwise this skill's
+# code-review.sh runs first, and the push then runs the repo's own hooks.
+review_push() {
+    review_blocked=false
+    if [ "$review_tooling" = skill ] && ! bash "$review_sh"; then
+        review_blocked=true
+        return 1
+    fi
+    git push -u origin "$snapshot" || {
+        [ "$review_tooling" = project ] && [ -f working/code-review-report.md ] && review_blocked=true
+        return 1
+    }
+}
+
 stage_push() {
     local attempt=0 retries=$cfg_ship_fix_retries msg
     cur_stage=push
-    ship_event "$ship_dir" push running "pushing $snapshot (the pre-push review runs first and can take several minutes)"
+    ship_event "$ship_dir" push running "reviewing and pushing $snapshot (the review can take several minutes)"
     while :; do
-        # Cleared before every attempt: only a marker written by this push's
-        # hook run counts as evidence of what just happened.
+        # Cleared before every attempt: only a marker written by this
+        # attempt's review counts as evidence of what just happened.
         rm -f "$autofix_marker"
-        if git push -u origin "$snapshot"; then
+        if review_push; then
             copy_report
             ship_event "$ship_dir" push passed "pushed $snapshot"
             return 0
@@ -713,7 +739,7 @@ stage_push() {
         fi
         if [ -f "$autofix_marker" ]; then
             msg="the review auto-fix is ready but ship_fix_retries=$retries is used up; the fix is uncommitted in the worktree"
-        elif [ -f working/code-review-report.md ]; then
+        elif $review_blocked; then
             msg="the review blocked the push with REQUIRED findings open; see $ship_dir/code-review-report.md"
         else
             msg="git push failed; see $ship_dir/ship.log"
@@ -730,7 +756,7 @@ pr_body() {
     echo ""
     git log --reverse --format='- %s' "origin/$ship_base..HEAD"
     echo ""
-    decisions=$(bash "$project_scripts/decisions.sh" --range "origin/$ship_base..HEAD")
+    decisions=$(bash "$decisions_sh" --range "origin/$ship_base..HEAD")
     if [ -n "$decisions" ]; then
         echo "## Decisions"
         echo ""
@@ -761,7 +787,7 @@ prod_pr_body() {
         echo "## Changes"
         echo ""
         git log --no-merges --reverse --format='- %s' "$range" | grep -vx -e '- Apply code review auto-fix'
-        decisions=$(bash "$project_scripts/decisions.sh" --range "$range")
+        decisions=$(bash "$decisions_sh" --range "$range")
         if [ -n "$decisions" ]; then
             echo ""
             echo "## Decisions"
@@ -886,7 +912,7 @@ pr_poll() {
 # leaves the host's default message. Without this a squash merge drops them.
 squash_body() {
     local trailers
-    trailers=$(bash "$project_scripts/decisions.sh" --trailers --range "origin/$ship_base..HEAD")
+    trailers=$(bash "$decisions_sh" --trailers --range "origin/$ship_base..HEAD")
     [ -n "$trailers" ] || return 0
     git log --reverse --format='* %s' "origin/$ship_base..HEAD"
     echo ""
@@ -1127,12 +1153,15 @@ if ! $prod; then
     if [ -n "$prev" ]; then
         ledger_set "$snapshot" "$prev" || rollback "couldn't seed the review ledger."
     fi
+    ship_exclude_local
     git worktree add -q "$worktree" "$snapshot" || rollback "git worktree add failed."
-    # .codereviewrc is gitignored, so the worktree doesn't have it.
+    # .codereviewrc is ignored, so the worktree doesn't have it.
     [ -f .codereviewrc ] && cp .codereviewrc "$worktree/.codereviewrc"
     mkdir -p "$worktree/working"
-    echo "Syncing dependencies in the worktree..."
-    (cd "$worktree" && uv sync -q) || rollback "uv sync failed in $worktree."
+    if [ -n "$cfg_ship_setup" ]; then
+        echo "Setting up the worktree: $cfg_ship_setup"
+        (cd "$worktree" && sh -c "$cfg_ship_setup") || rollback "ship_setup ($cfg_ship_setup) failed in $worktree."
+    fi
 fi
 
 ship_dir="$(ship_root)/$ship_id"
