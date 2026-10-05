@@ -40,15 +40,21 @@ review_sh="$skill_scripts/code-review.sh"
 decisions_sh="$project_root/scripts/decisions.sh"
 [ -f "$decisions_sh" ] || decisions_sh="$skill_scripts/decisions.sh"
 
-# ship_exclude_local — adds working/ and .codereviewrc to the repo's local
-# excludes (.git/info/exclude, never committed) when nothing ignores them yet.
-# The review writes its reports to working/ and .codereviewrc holds personal
-# settings; neither may end up in a ship's auto-fix commit.
+# ship_local_paths — paths a ship writes that must never be committed: the
+# review's reports and personal settings.
+ship_local_paths="working .codereviewrc"
+
+# ship_exclude_local — adds each of ship_local_paths to the repo's local
+# excludes (.git/info/exclude, never committed) unless it's already ignored,
+# already listed, or tracked (an exclude can't hide a tracked file; the
+# auto-fix commit leaves those out by pathspec instead).
 ship_exclude_local() {
     local exclude p
     exclude="$(git rev-parse --git-common-dir)/info/exclude"
-    for p in working/ .codereviewrc; do
+    for p in $ship_local_paths; do
         git check-ignore -q "$p" && continue
+        [ -n "$(git ls-files -- "$p")" ] && continue
+        grep -qxF "$p" "$exclude" 2>/dev/null && continue
         mkdir -p "$(dirname "$exclude")"
         printf '%s\n' "$p" >> "$exclude"
     done

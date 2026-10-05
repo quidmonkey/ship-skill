@@ -79,13 +79,22 @@ add_set() {
     set_keys="$set_keys$key "
 }
 
+# set_mode <mode> — one mode per call, so an allowed read-only call like
+# --plan can't also carry --resume.
+set_mode() {
+    [ "$mode" = run ] || die "--$mode and --$1 can't be combined."
+    mode=$1
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --plan) mode=plan ;;
+        --plan) set_mode plan ;;
         --status | --stop | --watch | --resume)
-            mode=${1#--}
-            ship_id=${2:-}
-            [ $# -gt 1 ] && shift
+            set_mode "${1#--}"
+            case "${2:-}" in
+                '' | --*) ;;
+                *) ship_id=$2; shift ;;
+            esac
             ;;
         --detach) detach=true ;;
         --yes) assume_yes=true ;;
@@ -701,26 +710,38 @@ copy_report() {
 # review_push — reviews and pushes the snapshot. In a repo with the scaffold's
 # review tooling the pre-push hook is the review; otherwise this skill's
 # code-review.sh runs first, and the push then runs the repo's own hooks.
+# Sets review_status to the skill review's exit status when that blocked.
 review_push() {
-    review_blocked=false
-    if [ "$review_tooling" = skill ] && ! bash "$review_sh"; then
-        review_blocked=true
-        return 1
+    review_status=0
+    if [ "$review_tooling" = skill ]; then
+        bash "$review_sh" || review_status=$?
+        [ "$review_status" -eq 0 ] || return 1
     fi
-    git push -u origin "$snapshot" || {
-        [ "$review_tooling" = project ] && [ -f working/code-review-report.md ] && review_blocked=true
-        return 1
-    }
+    git push -u origin "$snapshot"
+}
+
+# review_blocked — the last attempt failed in the review and it wrote a report.
+# The project's pre-push hook can't be told apart from the rest of git push,
+# so there a report is taken to mean the review blocked it.
+review_blocked() {
+    [ -f working/code-review-report.md ] || return 1
+    if [ "$review_tooling" = skill ]; then
+        [ "$review_status" -ne 0 ]
+    fi
 }
 
 stage_push() {
-    local attempt=0 retries=$cfg_ship_fix_retries msg
+    local attempt=0 retries=$cfg_ship_fix_retries msg p keep_out=()
     cur_stage=push
+    for p in $ship_local_paths; do
+        keep_out+=(":(exclude)$p")
+    done
     ship_event "$ship_dir" push running "reviewing and pushing $snapshot (the review can take several minutes)"
     while :; do
         # Cleared before every attempt: only a marker written by this
         # attempt's review counts as evidence of what just happened.
-        rm -f "$autofix_marker"
+        # The report too: a stale one would pass for this attempt's review.
+        rm -f "$autofix_marker" working/code-review-report.md
         if review_push; then
             copy_report
             ship_event "$ship_dir" push passed "pushed $snapshot"
@@ -728,7 +749,7 @@ stage_push() {
         fi
         copy_report
         if [ -f "$autofix_marker" ] && [ "$attempt" -lt "$retries" ]; then
-            git add -A
+            git add -A -- . "${keep_out[@]}"
             if ! git commit -q -m "Apply code review auto-fix" \
                 -m "Auto-fix resolved the REQUIRED findings from the pre-push code review."; then
                 fail_stage push "the auto-fix left nothing to commit; see $ship_dir/code-review-report.md"
@@ -739,8 +760,11 @@ stage_push() {
         fi
         if [ -f "$autofix_marker" ]; then
             msg="the review auto-fix is ready but ship_fix_retries=$retries is used up; the fix is uncommitted in the worktree"
-        elif $review_blocked; then
-            msg="the review blocked the push with REQUIRED findings open; see $ship_dir/code-review-report.md"
+        elif review_blocked; then
+            # Findings, or an agent that failed or timed out: the report says which.
+            msg="the review blocked the push; see $ship_dir/code-review-report.md"
+        elif [ "$review_status" -ne 0 ]; then
+            msg="the review failed before reviewing anything (exit $review_status); see $ship_dir/ship.log"
         else
             msg="git push failed; see $ship_dir/ship.log"
         fi

@@ -41,6 +41,7 @@ refute_cmd() {
     shift 2
     if "$@"; then ko "$name" "$detail"; else ok "$name"; fi
 }
+on_origin() { git ls-remote --exit-code --heads origin "$1" > /dev/null; }
 no_extra_worktrees() { [ -z "$(git worktree list | sed 1d)" ]; }
 latest() { readlink .git/ship/latest; }
 snapshot_of() { sed -n 's/.*"snapshot_branch": *"\([^"]*\)".*/\1/p' ".git/ship/$1/status.json"; }
@@ -103,6 +104,10 @@ assert "plan creates no worktree" "$(git worktree list)" no_extra_worktrees
 
 out=$(bash "$ship" --plan --stage push --sets 'review_modle=sonnet' 2>&1)
 expect "unknown key suggests the closest" "Did you mean 'review_model'" "$out"
+out=$(bash "$ship" --plan --resume 20990101-000000-abcdef0 2>&1)
+expect "--plan with --resume is refused" "can't be combined" "$out"
+out=$(bash "$ship" --status --stop 2>&1)
+expect "two modes are refused" "can't be combined" "$out"
 out=$(bash "$ship" --stage push < /dev/null 2>&1)
 expect "no terminal and no --yes refuses" "no terminal to confirm" "$out"
 
@@ -118,12 +123,12 @@ expect "passing ship ships to push" "shipped to push" "$out"
 expect "the review ran" "Code review PASSED" "$out"
 assert "passing ship exits 0 (rc=$rc)" "$out" [ "$rc" -eq 0 ]
 snap="ship/feature/x-${sha:0:7}"
-assert "origin has $snap" "$(git ls-remote origin)" git ls-remote -q --exit-code --heads origin "$snap"
+assert "origin has $snap" "$(git ls-remote origin)" on_origin "$snap"
 assert "passed ship removes its worktree" "$(git worktree list)" no_extra_worktrees
 assert "checkout is still feature/x" "$(git status)" [ "$(git symbolic-ref --short HEAD)" = feature/x ]
 assert "checkout is clean" "$(git status)" [ -z "$(git status --porcelain)" ]
 excl=$(cat .git/info/exclude)
-expect "working/ excluded locally" "^working/$" "$excl"
+expect "working/ excluded locally" "^working$" "$excl"
 expect ".codereviewrc excluded locally" "^\.codereviewrc$" "$excl"
 assert "report copied to the ship dir" "$(ls ".git/ship/$id")" [ -f ".git/ship/$id/code-review-report.md" ]
 out=$(bash "$ship" --status 2>&1)
@@ -136,11 +141,11 @@ git commit -qam "Second change"
 echo block > "$sb/mode"
 out=$(bash "$ship" --yes --stage push --sets 'fix_enabled=false' 2>&1)
 rc=$?
-expect "a blocking review fails the ship" "REQUIRED findings open" "$out"
+expect "a blocking review fails the ship" "the review blocked the push" "$out"
 assert "blocked ship exits non-zero" "$out" [ "$rc" -ne 0 ]
 bid=$(latest)
 expect "report has the finding" "broken, fails on every input" "$(cat ".git/ship/$bid/code-review-report.md" 2>&1)"
-refute_cmd "blocked ship didn't push" "$(git ls-remote origin)" git ls-remote -q --exit-code --heads origin "$(snapshot_of "$bid")"
+refute_cmd "blocked ship didn't push" "$(git ls-remote origin)" on_origin "$(snapshot_of "$bid")"
 refute_cmd "failed ship keeps its worktree" "no worktree left" no_extra_worktrees
 
 echo autofix > "$sb/mode"
@@ -187,6 +192,24 @@ rm .git/hooks/pre-push
 out=$(bash "$skill/scripts/set-ship-stage.sh" merge 2>&1)
 expect "set-ship-stage writes the stage" "ship_stage=merge written" "$out"
 refute ".codereviewrc stays out of git status" "codereviewrc" "$(git status --porcelain)"
+bash "$skill/scripts/set-ship-stage.sh" push > /dev/null 2>&1
+assert "exclude lines aren't duplicated" "$(cat .git/info/exclude)" \
+    [ "$(grep -cxF .codereviewrc .git/info/exclude)" = 1 ]
+
+# --- a repo that tracks .codereviewrc: personal edits stay out of commits ---------
+
+echo "== tracked .codereviewrc"
+new_repo tracked
+git add -f .codereviewrc
+git commit -qm "Track review settings"
+echo "# personal edit" >> .codereviewrc
+echo autofix > "$sb/mode"
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "tracked-settings ship passes" "shipped to push" "$out"
+files=$(git show --name-only --format= "origin/$(snapshot_of "$(latest)")")
+expect "auto-fix commit has the fix" "^app.txt$" "$files"
+refute "auto-fix commit leaves the tracked .codereviewrc out" "codereviewrc" "$files"
+refute "a tracked .codereviewrc isn't excluded" "codereviewrc" "$(cat .git/info/exclude)"
 
 # --- a Python repo: ship_setup syncs the worktree --------------------------------
 

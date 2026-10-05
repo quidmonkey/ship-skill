@@ -39,7 +39,7 @@ Where the review comes from depends on the repo:
 
 The decision trailers in the PR description come from the repo's `scripts/decisions.sh` when it has one, and from this skill's copy otherwise.
 
-`ship.sh` writes review reports to `working/` and personal settings to `.codereviewrc`. When the repo doesn't already ignore them, it adds both to `.git/info/exclude`, which stays local and is never committed, so neither ends up in an auto-fix commit.
+`ship.sh` writes review reports to `working/` and personal settings to `.codereviewrc`. When the repo doesn't already ignore or track them, it adds both to `.git/info/exclude`, which stays local and is never committed. The auto-fix commit leaves both out either way, so a tracked `.codereviewrc` with personal edits isn't pushed.
 
 Two settings depend on the repo's language. `ship_setup` is the command run in a new worktree before the review; it defaults to `uv sync -q` when there's a `pyproject.toml`, and to nothing otherwise. `fix_checks` lists the lint and test commands the review's fixer runs to check its work; it defaults to `uv run pre-commit;uv run pytest` with a `pyproject.toml`, and to none otherwise. For a Node repo, for example:
 
