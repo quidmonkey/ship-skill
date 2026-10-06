@@ -139,7 +139,7 @@ default_branch() {
 rc_set() {
     local key=$1 value=$2 file=${3:-.shiprc}
     if [ ! -f "$file" ]; then
-        printf '# Personal review/ship automation settings (kept out of git) -- see the README.md of the ship skill.\n' > "$file"
+        printf '# Personal review/ship automation settings (kept out of git) -- see docs/reference.md in the ship skill.\n' > "$file"
     fi
     if grep -q "^$key=" "$file" 2>/dev/null; then
         sed -i.bak "s/^$key=.*/$key=$value/" "$file" && rm -f "$file.bak"

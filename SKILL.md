@@ -12,7 +12,7 @@ description: |
 
 # /ship
 
-This skill's `scripts/ship.sh` does the work in its own git worktree, so the developer keeps editing while it runs. This skill plans the ship, starts it, and relays its progress. This skill's `README.md` documents the stages and settings.
+This skill's `scripts/ship.sh` does the work in its own git worktree, so the developer keeps editing while it runs. This skill plans the ship, starts it, and relays its progress. This skill's `docs/reference.md` documents the stages and settings.
 
 It works in any git repo with an `origin` remote. Run every command below from the repo, with the script at `~/.claude/skills/ship/scripts/ship.sh`, written exactly as shown so the permission rules match. A repo the scaffold skill created reviews each push with its own pre-push hook; any other repo is reviewed by this skill's `scripts/code-review.sh`, which `ship.sh` runs before the push. If `ship.sh` reports a `ship_contract` mismatch, relay the error and its fix. Don't work around it.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ship the current branch into develop (or --target) from a separate git
 # worktree, so none of it touches the developer's checkout. See docs in
-# the ship skill's README.md.
+# the ship skill's docs/reference.md.
 #
 # A prod ship (--target main or master) instead opens a PR from origin/develop,
 # frozen at its planned commit, into that branch: no worktree and no push
