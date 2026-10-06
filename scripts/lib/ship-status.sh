@@ -75,6 +75,31 @@ status_get() {
         | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
 }
 
+# status_config_get <file> <key> — the value <key> had when the ship started,
+# from the config object, unescaped.
+status_config_get() {
+    awk -v k="$2" '
+        index($0, "  \"config\": ") == 1 {
+            needle = "\"" k "\": {\"value\": \""
+            i = index($0, needle)
+            if (!i) exit
+            s = substr($0, i + length(needle))
+            while (s != "") {
+                c = substr(s, 1, 1)
+                if (c == "\"") break
+                if (c == "\\") {
+                    s = substr(s, 2)
+                    c = substr(s, 1, 1)
+                    if (c == "n") c = "\n"
+                    else if (c == "t") c = "\t"
+                }
+                printf "%s", c
+                s = substr(s, 2)
+            }
+            exit
+        }' "$1"
+}
+
 # ship_notify <message> — a desktop notification when ship_notify=desktop:
 # osascript on macOS, a toast through powershell.exe on Windows (Git Bash or
 # WSL), notify-send on Linux. Does nothing when none of them is installed.
@@ -245,13 +270,15 @@ ship_status_report() {
 # and exits when it finishes: 0 if it passed. Also exits if ship.sh died
 # without recording a finish. /ship runs this under a Monitor, which shows
 # one line per event and truncates it, so the kickoff event's comma-separated
-# details (snapshot, worktree) go on lines of their own.
+# details (snapshot, worktree) go on lines of their own. A retried ship's
+# watch starts at its last retry, not at the failure before it.
 ship_watch() {
-    local d f shown=0 total
+    local d f shown total
     local fmt='$2 == "kickoff" && $4 ~ /, / { print $2 " " $3; n = split($4, p, ", "); for (i = 1; i <= n; i++) print "- " p[i]; fflush(); next }
         { print $2 " " $3 ": " $4; fflush() }'
     d=$(ship_resolve_dir "${1:-}") || { echo "No ship with ID '${1:-latest}'." >&2; return 1; }
     f=$d/events
+    shown=$(awk -F '\t' '$2 == "retry" { n = NR - 1 } END { print n + 0 }' "$f")
     while :; do
         total=$(wc -l < "$f" | tr -d ' ')
         if [ "$total" -gt "$shown" ]; then

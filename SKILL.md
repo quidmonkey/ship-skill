@@ -1,13 +1,14 @@
 ---
 name: ship
-version: 1.4.0
+version: 1.5.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and verify the dev deploy, as far as the
   configured stage. `/ship main` (or master) is a prod release: a PR from develop into
-  main titled 'prod 🚀' with drafted release notes. Also reports on and stops running
+  main titled 'prod 🚀' with drafted release notes. Also reports on, stops and retries
   ships. Use when the user says "/ship", "ship it", "ship this branch", "open a PR for
-  this", "ship to prod", "release to main", "ship status", or "stop the ship".
+  this", "ship to prod", "release to main", "ship status", "stop the ship", "retry the
+  ship", or "try again" after a ship failed.
 ---
 
 # /ship
@@ -26,12 +27,13 @@ Nothing a ship writes carries agent attribution. That covers commits, squash com
 | `/ship main` (or `master`) | A prod release of `develop` into it; see "Prod release" below |
 | `/ship status [id]` | `bash ~/.claude/skills/ship/scripts/ship.sh --status [<id>]`, summarized |
 | `/ship stop [id]` | `bash ~/.claude/skills/ship/scripts/ship.sh --stop [<id>]`, and report what it left behind |
+| `/ship retry [id]` | Resume a failed or stopped ship where it stopped; see "Retry" below |
 
 Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A feature ship targets `develop` unless the invocation names another branch. The only way into `main` or `master` is a prod release.
 
 ## Rules
 
-- Start a ship only with the exact `ship.sh --detach ...` command from step 5. Run `ship.sh` only in the forms shown here, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
+- Start a ship only with the exact `ship.sh --detach ...` command from step 5, and resume one only with `ship.sh --retry`. Run `ship.sh` only in the forms shown here, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
 - The permission prompt on `ship.sh --detach` is the only confirmation. Don't ask "shall I proceed?" before it.
 - Pass overrides only as `--target`, `--stage`, `--sets` and `--notes-file` arguments, never as environment variables, so they show in the prompt.
 - Never edit `.shiprc` (or a scaffolded repo's `.codereviewrc`) for a one-run change, and never set `SKIP_CODE_REVIEW`.
@@ -67,7 +69,7 @@ If `--sets` changed, run the plan again with it. Skip this step at every other s
 
 Post the config block from the last plan, verbatim, in a code block: every line from `Ship <id>` through `Preflight` and any `Warnings`, without the `SHIP_*=` lines. Don't summarize it or replace it with a sentence like "preflight passes". The developer can't see the plan's output, and the next step's permission prompt is their only confirmation, so this block is how they check what they're approving.
 
-If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with the fix it names and stop. There's no proceed option. When a fix needs an interactive login, suggest running it in the session with a `!` prefix, for example `! gh auth login`.
+If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with the fix it names and stop. There's no proceed option. The exception is a `FAIL` that says to retry an earlier ship of this commit: that ship already pushed it, so go to "Retry" with its ID instead. When a fix needs an interactive login, suggest running it in the session with a `!` prefix, for example `! gh auth login`.
 
 ### 5. Start
 
@@ -90,7 +92,8 @@ Start a Monitor on `bash ~/.claude/skills/ship/scripts/ship.sh --watch <id>`. It
 When the watch exits:
 
 - **Passed:** summarize the PR URL, the merge commit, and the deploy result, as far as the stage went. A `verify_deploy skipped` line means the pipeline's path filters excluded the change, so there was nothing to deploy. That's a pass. Relay the final message's `git branch -d` suggestion (a prod release has none).
-- **Failed:** read `.git/ship/<id>/code-review-report.md` for a review failure, otherwise the end of `.git/ship/<id>/ship.log`. Explain what failed and how to fix it. A `git push failed` usually means one of the repo's hooks failed; the log has a `NOTE:` near the end pointing at the worktree `GIT_DIR` problem in `docs/reference.md`, so check whether that's the cause before guessing at others. A feature ship keeps its worktree and snapshot branch for inspection; give their paths. After a fix is committed on the developer's branch, `/ship` again ships the new commit.
+- **Failed:** read `.git/ship/<id>/code-review-report.md` for a review failure, otherwise the end of `.git/ship/<id>/ship.log`. Explain what failed and how to fix it. A `git push failed` usually means one of the repo's hooks failed; the log has a `NOTE:` near the end pointing at the worktree `GIT_DIR` problem in `docs/reference.md`, so check whether that's the cause before guessing at others. A feature ship keeps its worktree and snapshot branch for inspection; give their paths.
+- **What to do next:** when the final message ends with `then retry from <stage>`, the push already passed (or it's a prod release). Say what to fix, then that saying "try again" resumes the ship from that stage. Don't tell the developer to run `/ship` again. Otherwise the review blocked the push, or the push itself failed: a blocking review needs a fix committed on the developer's branch and a new `/ship`, and a failed push can be retried once its cause is fixed.
 
 The ship keeps running if the session closes. `/ship status` picks it up later.
 
@@ -136,6 +139,18 @@ Then run the plan again with `--notes-file <that path>` added. The notes are par
 ### 4. Show and start
 
 Post the notes, then the config block from the last plan as in Kickoff step 4, then run step 5 of Kickoff with `--target`, `--stage`, `--sets` and `--notes-file` exactly as planned. If the developer asks for changes to the notes, edit the file, plan again, and show both again. Follow the ship and report as in Kickoff steps 6 and 7.
+
+## Retry
+
+When a ship in this conversation failed or was stopped and the developer asks to retry it, in any words ("try again", "retry", "I logged in, go on"), resume it. Don't plan a new ship. The same applies to `/ship retry [id]`.
+
+Run `bash ~/.claude/skills/ship/scripts/ship.sh --retry <id>`, with the ID of the ship from this conversation. Leave out the ID when the conversation doesn't name one; the script then takes the latest ship and, if that one can't be retried, lists the ones that can.
+
+The retry uses the settings the ship started with and starts at the first stage that didn't pass. A push that passed isn't reviewed or pushed again. It checks the PR host login, and that origin still has the commit the ship pushed, then runs in the background. It prints a `Retry ship <id>` block ending in `Preflight`; post it verbatim in a code block, as in Kickoff step 4.
+
+- **Preflight failed:** list each `FAIL` line with its fix and stop. A login fix goes in the session with a `!` prefix, for example `! az login`; after it, the developer says "try again" and you run the same retry.
+- **Refused** (still running, already passed, worktree gone): relay the reason. A ship that can't be retried needs a new `/ship`.
+- **Resumed:** it prints `Ship <id> resumed in the background`. Follow and report it as in Kickoff steps 6 and 7. The watch starts at the retry, with a `retry running` line.
 
 ## Status
 

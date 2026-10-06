@@ -21,12 +21,17 @@
 #             times), then as far as ship_stage says: open_pr, merge,
 #             verify_deploy. Each stage transition is a line in
 #             .git/ship/<id>/events.
+#   retry     resume a ship that failed or was stopped, at the first stage that
+#             didn't pass, with the settings it started with. Checks the PR
+#             host login and that origin still has what the ship pushed, then
+#             runs in the background like --detach.
 #
 # Usage:
 #   ship.sh --plan [--target B] [--notes-file F] [--stage S] [--set k=v ...] [--sets 'k=v;k=v']
 #   ship.sh [--target B] [--notes-file F] [--stage S] [--set ...] [--detach] [--yes]
 #           [--id ID --expect-sha SHA --expect-config HASH]
 #   ship.sh --status [ID] | --stop [ID] | --watch [ID]
+#   ship.sh --retry [ID]   (default: the latest ship)
 #
 # Settings resolve as --set, then CR_<KEY>, then .shiprc, then the built-in
 # default (the project's scripts/lib/common.sh for review keys,
@@ -96,7 +101,7 @@ set_mode() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --plan) set_mode plan ;;
-        --status | --stop | --watch | --resume)
+        --status | --stop | --watch | --resume | --retry)
             set_mode "${1#--}"
             case "${2:-}" in
                 '' | --*) ;;
@@ -424,9 +429,19 @@ ship_owning() {
     done | tail -n 1
 }
 
+# ship_retryable <ship-dir> — the ship ended without passing and kept what a
+# retry needs: a feature ship's worktree and snapshot branch.
+ship_retryable() {
+    local f=$1/status.json wt
+    ! ship_is_running "$1" && [ "$(status_get "$f" state)" != passed ] || return 1
+    wt=$(status_get "$f" worktree)
+    [ -z "$wt" ] && return 0
+    [ -d "$wt" ] && git rev-parse -q --verify "refs/heads/$(status_get "$f" snapshot_branch)" >/dev/null
+}
+
 # preflight_feature — the developer's branch is shippable into ship_base.
 preflight_feature() {
-    local ahead origin_head hook rc=0
+    local ahead origin_head hook owner rc=0
     head_sha=$(git rev-parse HEAD 2>/dev/null)
     sha7=$(printf '%s' "$head_sha" | cut -c1-7)
 
@@ -478,8 +493,15 @@ preflight_feature() {
     # rejected if that ship committed an auto-fix, and a PR from it may be open.
     if [ -n "$branch" ]; then
         git ls-remote --exit-code --heads origin "refs/heads/$snapshot" >/dev/null 2>&1 || rc=$?
+        owner=$(ship_owning "$snapshot")
         case "$rc" in
-            0) pf_fail "origin already has $snapshot from an earlier ship of this commit. Merge or close its PR, delete the branch (git push origin --delete $snapshot), then /ship again." ;;
+            0)
+                if [ -n "$owner" ] && ship_retryable "$owner"; then
+                    pf_fail "origin already has $snapshot from ship ${owner##*/}, which pushed this commit and didn't finish. Retry it instead: ship.sh --retry ${owner##*/}"
+                else
+                    pf_fail "origin already has $snapshot from an earlier ship of this commit. Merge or close its PR, delete the branch (git push origin --delete $snapshot), then /ship again."
+                fi
+                ;;
             2) ;;
             *) pf_warn "Couldn't check origin for $snapshot (git ls-remote failed)." ;;
         esac
@@ -657,6 +679,11 @@ deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout depl
         in_list "$key" "$shown" && continue
         case "$(cfg_source "$key")" in --set | env*) setting_line "$key" ;; esac
     done
+    print_preflight
+}
+
+# print_preflight — the accounts and every preflight result.
+print_preflight() {
     if [ -n "$accounts" ]; then
         echo "Accounts"
         printf '%s' "$accounts"
@@ -1091,10 +1118,16 @@ finish() {
                 fi
                 ;;
         esac
-    elif $prod; then
-        msg="$msg. Log: $ship_dir/ship.log"
     else
-        msg="$msg. Kept for inspection: worktree $worktree, branch $snapshot, log $ship_dir/ship.log"
+        if $prod; then
+            msg="$msg. Log: $ship_dir/ship.log"
+        else
+            msg="$msg. Kept for inspection: worktree $worktree, branch $snapshot, log $ship_dir/ship.log"
+        fi
+        # A push the review blocked needs a new commit, not a retry.
+        if $prod || stage_done push; then
+            msg="$msg. Fix the cause, then retry from ${cur_stage:-push}: ship.sh --retry $ship_id"
+        fi
     fi
     # The finish event lands before finished_at, so anything that stops
     # watching at finished_at has already seen it.
@@ -1117,8 +1150,15 @@ on_exit() {
     finish failed "failed at ${cur_stage:-push}"
 }
 
+# stage_done <stage> — this ship's events record <stage> as passed or
+# skipped, so a retry doesn't run it again.
+stage_done() {
+    awk -F '\t' -v s="$1" '$2 == s && ($3 == "passed" || $3 == "skipped") { f = 1 } END { exit !f }' "$ship_dir/events"
+}
+
 # run_stages — everything after kickoff, in the worktree. The ship's own
-# process, whether it's the foreground run or the detached one.
+# process, whether it's the foreground run or the detached one. A retried
+# ship skips the stages that already passed.
 run_stages() {
     echo "$$" > "$ship_dir/pid"
     trap on_signal INT TERM
@@ -1129,12 +1169,12 @@ run_stages() {
     resolve_config
     export REVIEW_BASE_BRANCH=$ship_base
     if ! $prod; then
-        stage_push
+        stage_done push || stage_push
         stage_at_least open_pr || finish passed "shipped to push"
     fi
-    stage_open_pr
+    stage_done open_pr || stage_open_pr
     stage_at_least merge || finish passed "shipped to open_pr"
-    stage_merge
+    stage_done merge || stage_merge
     stage_at_least verify_deploy || finish passed "shipped to merge"
     stage_verify_deploy
     finish passed "shipped to verify_deploy"
@@ -1153,11 +1193,131 @@ load_ship() {
     set_prod
 }
 
+# start_detached — runs the ship's stages in the background. From the
+# worktree, so the resumed ship sources the snapshot's own
+# scripts/lib/common.sh and decisions.sh.
+start_detached() {
+    cd "${worktree:-$repo_root}" || die "worktree $worktree is gone."
+    nohup bash "$script_dir/ship.sh" --resume "$ship_id" > /dev/null 2>&1 &
+    echo $! > "$ship_dir/pid"
+}
+
 if [ "$mode" = resume ]; then
     load_ship "$ship_id"
     exec >> "$ship_dir/ship.log" 2>&1
     run_stages
 fi
+
+# --- retry (in the developer's checkout) -------------------------------------------
+
+# resume_stage — the first stage this ship still has to run, if any.
+resume_stage() {
+    local s
+    for s in push open_pr merge verify_deploy; do
+        $prod && [ "$s" = push ] && continue
+        stage_at_least "$s" || return 0
+        stage_done "$s" || { echo "$s"; return 0; }
+    done
+}
+
+# restore_config — exports every setting the ship started with, so the retry
+# runs the config the developer approved, not whatever .shiprc says now.
+restore_config() {
+    local key
+    # shellcheck disable=SC2086 # word-splitting the key list is the point
+    for key in $rc_known_keys; do
+        export "$(rc_env_name "$key")=$(status_config_get "$ship_dir/status.json" "$key")"
+    done
+}
+
+# preflight_retry <stage> — what resuming at <stage> needs: a clean worktree,
+# origin still at the pushed commit (develop still at the planned one, for a
+# prod PR), and the logins.
+preflight_retry() {
+    local stage=$1 local_sha remote_sha
+    if $prod; then
+        git fetch -q origin "$ship_dev" 2>/dev/null \
+            || pf_warn "git fetch origin $ship_dev failed; checking the last-fetched ref."
+        [ "$stage" != open_pr ] \
+            || [ "$(git rev-parse -q --verify "refs/remotes/origin/$ship_dev")" = "$snapshot_sha" ] \
+            || pf_fail "origin/$ship_dev moved past the planned $sha7, so the PR would release commits nobody planned. Run /ship $ship_base again."
+    elif [ -n "$(git -C "$worktree" status --porcelain)" ]; then
+        pf_fail "The worktree $worktree has uncommitted changes (the review's auto-fix?), so a retry wouldn't ship what was reviewed. Commit a fix on $source_branch, then /ship again."
+    elif [ "$stage" != push ]; then
+        local_sha=$(git rev-parse -q --verify "refs/heads/$snapshot")
+        remote_sha=$(git ls-remote origin "refs/heads/$snapshot" 2>/dev/null | cut -f1)
+        if [ -z "$remote_sha" ]; then
+            pf_fail "origin no longer has $snapshot. /ship again to push it."
+        elif [ "$remote_sha" != "$local_sha" ]; then
+            pf_fail "origin's $snapshot is at ${remote_sha:0:7}, not the ${local_sha:0:7} this ship pushed. Delete it (git push origin --delete $snapshot), then /ship again."
+        else
+            pf_ok "origin has $snapshot at ${local_sha:0:7}"
+        fi
+    fi
+    stage_at_least open_pr && [ "$stage" != verify_deploy ] && preflight_host
+    if stage_at_least verify_deploy; then
+        deploy_auth_ok || pf_fail "gcloud has no active account. Run \`! gcloud auth login\` in the session, then retry."
+    fi
+    return 0
+}
+
+# retry — resumes a failed or stopped ship in the background at the first
+# stage that didn't pass. Without an ID, the latest ship.
+retry() {
+    local latest d candidates="" stage
+    if [ -z "$ship_id" ]; then
+        d=$(ship_resolve_dir latest) || die "there's no ship to retry."
+        latest=${d##*/}
+        if ! ship_retryable "$d"; then
+            for d in $(ship_dirs); do
+                ship_retryable "$d" && candidates="$candidates ${d##*/}"
+            done
+            [ -n "$candidates" ] || die "the latest ship, $latest, can't be retried (state: $(status_get "$d/status.json" state)), and no other ship can."
+            die "the latest ship, $latest, can't be retried. Name one of these:$candidates"
+        fi
+        ship_id=$latest
+    fi
+    load_ship "$ship_id"
+    ship_is_running "$ship_dir" && die "ship $ship_id is still running. Follow it with /ship status."
+    [ "$(status_get "$ship_dir/status.json" state)" != passed ] || die "ship $ship_id passed; there's nothing to retry."
+    $prod || [ -d "$worktree" ] || die "ship $ship_id's worktree $worktree is gone, so it can't be retried. /ship again."
+    restore_config
+    resolve_config
+    stage=$(resume_stage)
+    [ -n "$stage" ] || die "every stage of ship $ship_id passed; there's nothing to retry."
+    sha7=${snapshot_sha:0:7}
+    preflight_retry "$stage"
+
+    echo "Retry ship $ship_id"
+    if $prod; then
+        printf '  %-24s %s\n' source "origin/$ship_dev @ $sha7"
+    else
+        printf '  %-24s %s\n' source "$source_branch @ $sha7"
+        printf '  %-24s %s\n' snapshot "$snapshot"
+        printf '  %-24s %s\n' worktree "$worktree"
+    fi
+    printf '  %-24s %s\n' target "$ship_base"
+    printf '  %-24s %s\n' "resumes at" "$stage, through ship_stage=$cfg_ship_stage, with the settings it started with"
+    printf '  %-24s %s\n' log "$ship_dir/ship.log"
+    print_preflight
+    if [ -n "$pf_fails" ]; then
+        echo ""
+        echo "Preflight failed; the ship wasn't retried. Fix the FAIL items above, then retry it again." >&2
+        exit 1
+    fi
+
+    status_set "$ship_dir/status.json" finished_at ""
+    ship_event "$ship_dir" retry running "resuming at $stage" >> "$ship_dir/ship.log"
+    start_detached
+    echo ""
+    echo "Ship $ship_id resumed in the background at $stage."
+    echo "SHIP_ID=$ship_id"
+    echo "Events: $ship_dir/events"
+    echo "Log:    $ship_dir/ship.log"
+    exit 0
+}
+
+[ "$mode" = retry ] && retry
 
 # --- kickoff (in the developer's checkout) -----------------------------------------
 
@@ -1253,11 +1413,7 @@ fi
 ship_event "$ship_dir" kickoff passed "$kickoff_msg" >> "$ship_dir/ship.log"
 
 if [ "$detach" = true ]; then
-    # Runs from the worktree, so the resumed ship sources the snapshot's own
-    # scripts/lib/common.sh and decisions.sh.
-    cd "${worktree:-$repo_root}" || die "worktree $worktree is gone."
-    nohup bash "$script_dir/ship.sh" --resume "$ship_id" > /dev/null 2>&1 &
-    echo $! > "$ship_dir/pid"
+    start_detached
     echo "Ship $ship_id started in the background."
     echo "SHIP_ID=$ship_id"
     echo "Events: $ship_dir/events"

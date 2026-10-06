@@ -19,6 +19,8 @@ How a ship runs, every setting, and where the files live. The README covers the 
 
 Your checkout and local branches are never touched. After a merge the final message suggests `git branch -d <branch>`, and nothing else changes. A passed ship removes its worktree and local snapshot branch. A failed or stopped one keeps both for inspection.
 
+A ship that failed or was stopped after its push can be retried. In a session, fix the cause (an expired `az login`, say) and tell Claude to try again. `ship.sh --retry [<id>]` resumes the ship at the first stage that didn't pass, with the settings it started with, so the review and push aren't repeated. It first checks the PR host login and that origin still has the pushed commit. With no ID it takes the latest ship. A prod release can be retried too, unless `develop` has moved since the plan. If the review blocked the push, commit a fix and `/ship` again instead. Planning a new ship of a commit that a failed ship already pushed fails with a pointer to the retry.
+
 A background ship keeps running if the session closes. Each ship's `status.json`, `events`, `ship.log` and review report live in `.git/ship/<id>/`. They're deleted `ship_log_retention_days` (default 30) after the ship finishes.
 
 At `open_pr` without named reviewers, `/ship` asks whether to add any. At `merge` and above the PR is approved and merged right away, so the plan warns if `pr_reviewers` is set.
@@ -33,6 +35,7 @@ At `open_pr` without named reviewers, `/ship` asks whether to add any. At `merge
 /ship review_model=sonnet    # any .shiprc key, for this run
 /ship status                 # running and recent ships
 /ship stop                   # stop a running ship and list what it left (open PR, armed auto-merge)
+/ship retry                  # resume a failed or stopped ship where it stopped
 
 make ship-plan STAGE=merge SET='review_model=sonnet'   # the plan only
 make ship STAGE=merge                                  # plan, prompt, then run in the foreground

@@ -406,6 +406,52 @@ expect "the prompt lists the checks" "^    npm run lint$" "$args"
 expect "the prompt says to run checks exactly as written" "starting exactly as written here" "$args"
 refute "the reviewer gets no write tools" "^Read,Edit" "$args"
 
+# --- retry: a ship that fails after the push resumes where it stopped -------------
+
+echo "== retry"
+new_repo retry
+# A fake gh whose login expires at the first PR create while $sb/gh-expire exists.
+mkdir -p "$sb/ghbin"
+cat > "$sb/ghbin/gh" <<EOF
+case "\$1 \$2" in
+    "auth status") [ -f "$sb/gh-auth" ] ;;
+    "api user") echo tester ;;
+    "pr create")
+        if [ -f "$sb/gh-expire" ]; then rm -f "$sb/gh-auth" "$sb/gh-expire"; echo "gh: login required" >&2; exit 1; fi
+        echo "https://github.com/o/r/pull/7"
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$sb/ghbin/gh"
+path_before=$PATH
+export PATH="$sb/ghbin:$PATH"
+touch "$sb/gh-auth" "$sb/gh-expire"
+bash "$ship" --plan --stage push > /dev/null 2>&1
+out=$(bash "$ship" --yes --stage open_pr --sets 'pr_host=gh;pr_reviewers=' 2>&1)
+expect "an expired login fails open_pr" "auth expired at open_pr" "$out"
+expect "the failure says how to retry" "retry from open_pr: ship.sh --retry" "$out"
+rid=$(latest)
+out=$(bash "$ship" --plan --stage open_pr --sets 'pr_host=gh;pr_reviewers=' 2>&1)
+expect "a new ship of the same commit points at the retry" "Retry it instead: ship.sh --retry $rid" "$out"
+out=$(bash "$ship" --retry 2>&1)
+expect "retry checks the login" "gh isn't logged in" "$out"
+expect "a failed retry check starts nothing" "the ship wasn't retried" "$out"
+touch "$sb/gh-auth"
+reviews=$(cat "$sb/prompts" 2>/dev/null | wc -l)
+out=$(bash "$ship" --retry 2>&1)
+expect "retry resumes at open_pr" "resumed in the background at open_pr" "$out"
+expect "retry uses the settings the ship started with" "gh +tester" "$out"
+out=$(bash "$ship" --watch "$rid" 2>&1)
+expect "the retried ship opens the PR" "shipped to open_pr\. PR: https://github.com/o/r/pull/7" "$out"
+refute "the watch starts at the retry" "^push " "$out"
+assert "the retry doesn't review again" "$(cat "$sb/prompts" 2>/dev/null | wc -l) != $reviews" \
+    [ "$(cat "$sb/prompts" 2>/dev/null | wc -l)" = "$reviews" ]
+assert "the retried ship removes its worktree" "$(git worktree list)" no_extra_worktrees
+out=$(bash "$ship" --retry "$rid" 2>&1)
+expect "a passed ship can't be retried" "nothing to retry" "$out"
+export PATH=$path_before
+
 # --- a scaffolded repo: the project's tooling and pre-push hook -------------------
 
 echo "== scaffolded repo"

@@ -66,7 +66,7 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 | Path | Purpose |
 |---|---|
 | `SKILL.md` (this skill) | The `/ship` skill: kickoff, status, stop, and stage notifications |
-| `scripts/ship.sh` (this skill) | Orchestrates one ship: plan, preflight, worktree, stages. `--plan` prints the config block and creates nothing. Runs in the foreground by default, or `--detach` for the background. `--status`, `--stop` and `--watch` wrap the status helpers |
+| `scripts/ship.sh` (this skill) | Orchestrates one ship: plan, preflight, worktree, stages. `--plan` prints the config block and creates nothing. Runs in the foreground by default, or `--detach` for the background. `--status`, `--stop` and `--watch` wrap the status helpers. `--retry` resumes a failed or stopped ship |
 | `scripts/lib/ship-config.sh` (this skill) | Picks the project's tooling or the skill's (see Packaging), checks `ship_contract`, adds the ship keys and their defaults, sets `ship_base`, creates `.shiprc` and commits it to `.gitignore` (see Configuration), reads each key from `.shiprc` or, for a project's review keys, its `.codereviewrc`, and adds the review's report files under `working/` to `.git/info/exclude` when nothing ignores them |
 | `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` (this skill) | The review tooling for repos without their own |
 | `scripts/lib/review-docs.sh` (this skill) | Finds the documents of intended behavior for the skill's review and the plan's `docs` line (see Documented intent) |
@@ -80,7 +80,7 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 | `scripts/lib/common.sh` (project, optional) | `rc_get` checks the `CR_<KEY>` environment variable before the rc file (see Overrides); the review keys, read from the project's `.codereviewrc`; the ledger; `ship_contract` |
 | `scripts/code-review.sh` (project, optional) | The pre-push review. Honors `REVIEW_BASE_BRANCH` for a branch's first review (see Review base) |
 | `Makefile` (project, optional) | Includes `ship.mk`; `make setup` clones this skill if it's missing |
-| `~/.claude/settings.json` (user) | `ask` rules for `ship.sh --detach`, `ship.sh --yes`, `make ship` and `make ship *`; `allow` rules for `ship.sh --plan`, `--status` and `--watch`. A scaffolded project's `.claude/settings.json` carries the `make ship` rules too |
+| `~/.claude/settings.json` (user) | `ask` rules for `ship.sh --detach`, `ship.sh --yes`, `ship.sh --retry`, `make ship` and `make ship *`; `allow` rules for `ship.sh --plan`, `--status` and `--watch`. A scaffolded project's `.claude/settings.json` carries the `make ship` rules too |
 
 ## Flow
 
@@ -181,7 +181,18 @@ Everything below uses the merge commit.
 ### 7. Finish
 
 - **Passed:** set `finished_at`, emit a final event, remove the worktree, and delete the local snapshot branch.
-- **Failed or stopped:** set `finished_at`, keep the worktree and snapshot branch for inspection, and put their paths in the final event.
+- **Failed or stopped:** set `finished_at`, keep the worktree and snapshot branch for inspection, and put their paths in the final event. When the push had passed, or for a prod ship, the final event also names the retry command.
+
+### 8. Retry
+
+`ship.sh --retry [<id>]` resumes a ship that failed or was stopped, without a new plan. With no ID it takes the latest ship, and lists the retryable ones if that one isn't.
+
+- **What runs:** the stages from the first one whose events don't record `passed` or `skipped`, through the ship's `ship_stage`. A passed push isn't reviewed or pushed again, and a passed `open_pr` isn't opened again (merge reads the PR from `status.json`).
+- **Settings:** the values recorded in `status.json`'s config object, exported as `CR_<KEY>`. A retry runs the config the developer approved, not whatever `.shiprc` says now.
+- **Checks:** the ship isn't running and didn't pass; a feature ship's worktree exists and is clean; past the push, origin's snapshot branch is still the local snapshot tip; for a prod ship resuming at `open_pr`, `origin/develop` is still the planned commit; the PR host login (and `gcloud` for `verify_deploy`). It prints a short block and the preflight results, and starts nothing if any check fails.
+- **Start:** clears `finished_at`, appends a `retry running` event, and starts `--resume` in the background like `--detach`. `--watch` starts at the last `retry` event.
+
+A new plan for a commit whose snapshot branch is on origin from a retryable ship fails with "Retry it instead: ship.sh --retry <id>". Deleting the branch and shipping again was the only option before, and it repeated work that had passed.
 
 ## Preflight
 
@@ -202,7 +213,7 @@ Preflight runs every check the resolved stage needs, before anything is created 
 
 Each failure message names its fix. For example: "gh isn't logged in. Run `! gh auth login` in the session, then `/ship` again."
 
-Background runs can't log in interactively. If credentials expire mid-run, the stage fails with "auth expired at <stage>". Anything already armed stays as it is: an open PR stays open, and auto-complete stays set.
+Background runs can't log in interactively. If credentials expire mid-run, the stage fails with "auth expired at <stage>". Anything already armed stays as it is: an open PR stays open, and auto-complete stays set. After logging in again, a retry resumes at that stage (see Retry).
 
 ## Status, events and logs
 
@@ -279,6 +290,7 @@ The skill file is `~/.claude/skills/ship/SKILL.md`, a user-level skill.
 | `/ship [stage] [key=value ...]` | If the stage is `open_pr` and no reviewers were given, asks for reviewers first (see Plan and confirm). Runs `ship.sh --plan [--stage <stage>] [--sets ...]` and posts the config block. If preflight passed, runs `ship.sh --detach --yes --id <id> --expect-sha <sha> --expect-config <hash>` with the same `--stage` and `--sets`. Plain-language requests map to `--sets` too: "ship it with sonnet for the review" becomes `--sets 'review_model=sonnet'`. After a denied prompt, a follow-up like "same, but with `review_effort=max`" starts a fresh plan with the previous overrides plus the new one. The `ask` permission prompt on that command is the single confirmation. If it's denied, the skill reports the ship was cancelled and stops. If it's approved, the skill starts a Monitor on the ship's `events` file and posts one line per event. At the end, posts a summary. On failure, it reads the copied review report or `ship.log` and explains what went wrong and how to fix it |
 | `/ship status [id]` | Summarizes every running ship and the last few finished ones from their `status.json` files |
 | `/ship stop [id]` | Kills the background process, sets the state to `stopped`, and reports anything left behind: an open PR, armed auto-complete, the worktree |
+| `/ship retry [id]`, or "try again" after a failure | Runs `ship.sh --retry <id>` with the ship from the conversation, posts its block, and follows it like a new ship |
 
 The job keeps running if the session closes. When `ship_notify=desktop` is set, the script also sends a desktop notification when the ship passes, fails or stops (default `none`). It uses `osascript` on macOS, a toast through `powershell.exe` on Windows (Git Bash or WSL), and `notify-send` on Linux, and does nothing when none of them is installed.
 

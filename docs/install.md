@@ -23,6 +23,7 @@ Add these rules to `~/.claude/settings.json`, so starting a ship always shows a 
 "ask": [
   "Bash(bash *.claude/skills/ship/scripts/ship.sh --detach*)",
   "Bash(bash *.claude/skills/ship/scripts/ship.sh --yes*)",
+  "Bash(bash *.claude/skills/ship/scripts/ship.sh --retry*)",
   "Bash(make ship)",
   "Bash(make ship *)"
 ]

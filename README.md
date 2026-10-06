@@ -27,6 +27,7 @@ In a Claude Code session, on your feature branch:
 /ship main       # 🧐🚀 release develop to prod
 /ship status     # 🔭 what's running
 /ship stop       # 🛑 stop it
+/ship retry      # 🔁 pick up a failed ship where it stopped
 ```
 
 `/ship` shows you a plan first and starts only after you say yes. Your checkout is never touched. 🙌
