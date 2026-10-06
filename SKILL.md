@@ -90,7 +90,7 @@ Start a Monitor on `bash ~/.claude/skills/ship/scripts/ship.sh --watch <id>`. It
 When the watch exits:
 
 - **Passed:** summarize the PR URL, the merge commit, and the deploy result, as far as the stage went. A `verify_deploy skipped` line means the pipeline's path filters excluded the change, so there was nothing to deploy. That's a pass. Relay the final message's `git branch -d` suggestion (a prod release has none).
-- **Failed:** read `.git/ship/<id>/code-review-report.md` for a review failure, otherwise the end of `.git/ship/<id>/ship.log`. Explain what failed and how to fix it. A feature ship keeps its worktree and snapshot branch for inspection; give their paths. After a fix is committed on the developer's branch, `/ship` again ships the new commit.
+- **Failed:** read `.git/ship/<id>/code-review-report.md` for a review failure, otherwise the end of `.git/ship/<id>/ship.log`. Explain what failed and how to fix it. A `git push failed` usually means one of the repo's hooks failed; the log has a `NOTE:` near the end pointing at the worktree `GIT_DIR` problem in `docs/reference.md`, so check whether that's the cause before guessing at others. A feature ship keeps its worktree and snapshot branch for inspection; give their paths. After a fix is committed on the developer's branch, `/ship` again ships the new commit.
 
 The ship keeps running if the session closes. `/ship status` picks it up later.
 

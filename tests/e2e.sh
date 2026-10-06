@@ -235,6 +235,7 @@ chmod +x .git/hooks/pre-push
 out=$(bash "$ship" --yes --stage push 2>&1)
 expect "the repo's pre-push hook runs" "repo hook says no" "$out"
 expect "a hook failure is reported as a push failure" "git push failed" "$out"
+expect "a hook failure points at the worktree GIT_DIR note" "Hooks in the ship worktree" "$out"
 rm .git/hooks/pre-push
 
 out=$(bash "$ship" --yes --stage push --detach 2>&1)

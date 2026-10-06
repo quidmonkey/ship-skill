@@ -145,6 +145,18 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 
 `/ship` squashes by default. When the branch has decision trailers, it writes the squash commit message itself, listing the commits and then every trailer, so nothing is lost. A squash merge from the host's web UI does not do this. If you turn squash merging off on the host, set `pr_merge_method=merge` (or `rebase`), or the merge stage fails to arm auto-merge.
 
+## Hooks in the ship worktree
+
+The push, and the auto-fix commit, run the repo's hooks in the ship's worktree. In a worktree, git sets `GIT_DIR` to `.git/worktrees/<name>` for every hook it runs; in your main checkout it doesn't. A hook that runs git against another repository inherits that variable, so git looks in the wrong repo. `terraform init` with `git::` module sources fails with `invalid ref` for every module, and installs from git URLs or hook scripts that clone or `cd` elsewhere fail in similar ways. The ship then reports `git push failed`.
+
+Fix it in the hook by clearing the variables before the command that runs git:
+
+```yaml
+entry: bash -euc 'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; terraform -chdir=infra init -backend=false'
+```
+
+Commit the fix on the branch you ship, since the ship runs the hooks from its snapshot. Hooks that only check the current files (linters, type checkers, tests) aren't affected, and pre-commit already clears these variables for its own downloads.
+
 ## Layout
 
 | Path | What it is |

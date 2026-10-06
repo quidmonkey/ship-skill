@@ -797,6 +797,10 @@ stage_push() {
         elif [ "$review_status" -ne 0 ]; then
             msg="the review failed before reviewing anything (exit $review_status); see $ship_dir/ship.log"
         else
+            # Usually a hook. Hooks here run in a worktree with GIT_DIR set,
+            # which breaks any hook that runs git in another repo.
+            echo ""
+            echo "NOTE: if a hook failed here but passes in your checkout, it may run git in another repo with this worktree's GIT_DIR. See Hooks in the ship worktree in $(dirname "$script_dir")/docs/reference.md."
             msg="git push failed; see $ship_dir/ship.log"
         fi
         fail_stage push "$msg"
