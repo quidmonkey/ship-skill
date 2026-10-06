@@ -65,7 +65,7 @@ If `--sets` changed, run the plan again with it. Skip this step at every other s
 
 ### 4. Show the plan
 
-Post the config block from the last plan in a code block.
+Post the config block from the last plan, verbatim, in a code block: every line from `Ship <id>` through `Preflight` and any `Warnings`, without the `SHIP_*=` lines. Don't summarize it or replace it with a sentence like "preflight passes". The developer can't see the plan's output, and the next step's permission prompt is their only confirmation, so this block is how they check what they're approving.
 
 If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with the fix it names and stop. There's no proceed option. When a fix needs an interactive login, suggest running it in the session with a `!` prefix, for example `! gh auth login`.
 
@@ -135,7 +135,7 @@ Then run the plan again with `--notes-file <that path>` added. The notes are par
 
 ### 4. Show and start
 
-Post the notes, then the config block from the last plan, then run step 5 of Kickoff with `--target`, `--stage`, `--sets` and `--notes-file` exactly as planned. If the developer asks for changes to the notes, edit the file, plan again, and show both again. Follow the ship and report as in Kickoff steps 6 and 7.
+Post the notes, then the config block from the last plan as in Kickoff step 4, then run step 5 of Kickoff with `--target`, `--stage`, `--sets` and `--notes-file` exactly as planned. If the developer asks for changes to the notes, edit the file, plan again, and show both again. Follow the ship and report as in Kickoff steps 6 and 7.
 
 ## Status
 
