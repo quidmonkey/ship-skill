@@ -243,20 +243,24 @@ ship_status_report() {
 
 # ship_watch [id] — prints the ship's events as they arrive, one line each,
 # and exits when it finishes: 0 if it passed. Also exits if ship.sh died
-# without recording a finish. /ship runs this under a Monitor.
+# without recording a finish. /ship runs this under a Monitor, which shows
+# one line per event and truncates it, so the kickoff event's comma-separated
+# details (snapshot, worktree) go on lines of their own.
 ship_watch() {
     local d f shown=0 total
+    local fmt='$2 == "kickoff" && $4 ~ /, / { print $2 " " $3; n = split($4, p, ", "); for (i = 1; i <= n; i++) print "- " p[i]; fflush(); next }
+        { print $2 " " $3 ": " $4; fflush() }'
     d=$(ship_resolve_dir "${1:-}") || { echo "No ship with ID '${1:-latest}'." >&2; return 1; }
     f=$d/events
     while :; do
         total=$(wc -l < "$f" | tr -d ' ')
         if [ "$total" -gt "$shown" ]; then
-            sed -n "$((shown + 1)),${total}p" "$f" | awk -F '\t' '{ print $2 " " $3 ": " $4; fflush() }'
+            sed -n "$((shown + 1)),${total}p" "$f" | awk -F '\t' "$fmt"
             shown=$total
         fi
         if [ -n "$(status_get "$d/status.json" finished_at)" ]; then
             # One more pass in case the finish line landed after the count.
-            sed -n "$((shown + 1)),\$p" "$f" | awk -F '\t' '{ print $2 " " $3 ": " $4 }'
+            sed -n "$((shown + 1)),\$p" "$f" | awk -F '\t' "$fmt"
             [ "$(status_get "$d/status.json" state)" = passed ]
             return
         fi

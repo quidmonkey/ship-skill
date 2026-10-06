@@ -83,7 +83,7 @@ bash ~/.claude/skills/ship/scripts/ship.sh --detach --yes --id <SHIP_ID> --expec
 
 ### 6. Follow it
 
-Start a Monitor on `bash ~/.claude/skills/ship/scripts/ship.sh --watch <id>`. It prints one line per stage transition, `<stage> <state>: <message>`, and exits when the ship finishes. Post each line as a short update. A `waiting` line names what the ship is blocked on (a required check, a review, a deploy approval); say so plainly.
+Start a Monitor on `bash ~/.claude/skills/ship/scripts/ship.sh --watch <id>`. It prints one line per stage transition, `<stage> <state>: <message>`, except the feature kickoff, which prints `kickoff passed` followed by a `- snapshot ...` and a `- worktree ...` line. It exits when the ship finishes. Post each line as a short update. A `waiting` line names what the ship is blocked on (a required check, a review, a deploy approval); say so plainly.
 
 ### 7. Report
 
