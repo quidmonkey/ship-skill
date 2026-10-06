@@ -6,9 +6,9 @@
 # A prod ship (--target main or master) instead opens a PR from origin/develop,
 # frozen at its planned commit, into that branch: no worktree and no push
 # (every change was reviewed on its way into develop). The PR is titled
-# 'prod 🚀' with the --notes-file release notes as its description, it merges
-# with a merge commit and never deletes develop, and its stage defaults to
-# open_pr whatever .shiprc says.
+# 'prod 🚀' with the --notes-file release notes as its description, and it
+# merges with a merge commit and never deletes develop. Otherwise it follows
+# the same settings as a feature ship.
 #
 #   plan      read .shiprc and overrides, check the repo and every tool the
 #             stage needs, print the config block. Creates nothing but .shiprc
@@ -16,11 +16,10 @@
 #   kickoff   freeze HEAD as ship/<branch>-<sha7> (ship/<target>/<branch>-<sha7>
 #             for a target other than develop), seed its review-ledger entry,
 #             create the worktree ../<repo>.ship-<id>, and .git/ship/<id>/.
-#   stages    in the worktree: push (the pre-push review runs there, and an
-#             auto-fix is committed and pushed again up to ship_fix_retries
-#             times), then as far as ship_stage says: open_pr, merge,
-#             verify_deploy. Each stage transition is a line in
-#             .git/ship/<id>/events.
+#   stages    in the worktree: push (code-review.sh runs first, and an
+#             auto-fix is committed and pushed again once), then as far as ship_stage says: open_pr, merge,
+#             verify_deploy (runs deploy_check). Each stage transition is a
+#             line in .git/ship/<id>/events.
 #   retry     resume a ship that failed or was stopped, at the first stage that
 #             didn't pass, with the settings it started with. Checks the PR
 #             host login and that origin still has what the ship pushed, then
@@ -34,15 +33,11 @@
 #   ship.sh --retry [ID]   (default: the latest ship)
 #
 # Settings resolve as --set, then CR_<KEY>, then .shiprc, then the built-in
-# default (the project's scripts/lib/common.sh for review keys,
-# lib/ship-config.sh for ship keys). A project with its own review tooling
-# keeps its review keys in .codereviewrc instead of .shiprc. Overrides are
-# exported as CR_<KEY>, so the pre-push review in the worktree sees them too.
-# They're never written back.
+# default (lib/common.sh). Overrides are exported as CR_<KEY>, so the review
+# in the worktree sees them too. They're never written back.
 #
 # First run: a plan or kickoff in a repo without .shiprc creates it as a copy
-# of shiprc.template (nothing comes from .codereviewrc), and commits .shiprc
-# to .gitignore on the current branch. Each prints a NOTE: line.
+# of shiprc.template and excludes it in .git/info/exclude, with a NOTE: line.
 #
 # Without --id, kickoff shows the plan and asks Proceed? [y/N] on a terminal,
 # and refuses without one unless --yes. With --id (what /ship passes after its
@@ -57,8 +52,6 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 source "$script_dir/lib/ship-config.sh"
 # shellcheck source=lib/ship-status.sh
 source "$script_dir/lib/ship-status.sh"
-# shellcheck source=lib/ship-deploy.sh
-source "$script_dir/lib/ship-deploy.sh"
 
 die() {
     echo "ERROR: $*" >&2
@@ -173,30 +166,19 @@ resolve_config() {
     local key
     # shellcheck disable=SC2086 # word-splitting the key list is the point
     for key in $rc_known_keys; do
-        printf -v "cfg_$key" '%s' "$(ship_value "$key")"
+        printf -v "cfg_$key" '%s' "$(rc_value "$key")"
     done
-    # A prod ship goes past open_pr only when this run asks for it: the
-    # configured stage is for feature ships.
-    prod_stage_default=false
-    if $prod; then
-        case "$(cfg_source ship_stage)" in
-            --set | env*) ;;
-            *) cfg_ship_stage=open_pr; prod_stage_default=true ;;
-        esac
-    fi
 }
 
 # cfg_source <key> — where <key>'s value came from.
 cfg_source() {
-    local env_name file
+    local env_name
     case "$set_keys" in *" $1 "*) echo "--set"; return ;; esac
     env_name=$(rc_env_name "$1")
     if [ -n "${!env_name+x}" ]; then
         echo "env $env_name"
-    elif [ "$1" = ship_stage ] && [ "${prod_stage_default:-false}" = true ]; then
-        echo "prod default"
-    elif file=$(rc_file_of "$1") && grep -q "^$1=" "$file" 2>/dev/null; then
-        echo "$file"
+    elif grep -q "^$1=" "$ship_rc" 2>/dev/null; then
+        echo "$ship_rc"
     else
         echo default
     fi
@@ -297,32 +279,15 @@ check_env_keys() {
 validate_config() {
     check_env_keys
     check_enum ship_stage push open_pr merge verify_deploy
-    check_enum review_agent claude custom
-    check_enum fix_agent claude custom
     check_enum review_effort low medium high xhigh max default
-    check_enum review_spec_effort low medium high xhigh max default
-    check_enum fix_effort low medium high xhigh max default
-    check_enum enabled true false
-    check_enum fix_enabled true false
     check_enum pr_self_approve true false
     check_enum ship_notify none desktop
     check_enum pr_host gh az
     check_enum pr_merge_method squash merge rebase
-    check_enum deploy_proxy true false
-    check_enum deploy_match sha time
     check_int agent_timeout 1
-    check_int fix_max_iterations 1
-    check_int ship_fix_retries 0
-    check_int ship_log_retention_days 0
-    check_int pr_poll_interval 1
+    check_int fix_max_iterations 0
     check_int pr_poll_timeout 1
-    check_int deploy_run_grace 0
-    check_int deploy_poll_timeout 1
-    check_int deploy_smoke_timeout 1
-    [ "$cfg_review_agent" = custom ] && [ -z "$cfg_command" ] \
-        && pf_fail "review_agent=custom needs command= in $(rc_file_of command)."
-    [ "$cfg_fix_enabled" = true ] && [ "$cfg_fix_agent" = custom ] && [ -z "$cfg_fix_command" ] \
-        && pf_fail "fix_agent=custom needs fix_command= in $(rc_file_of fix_command)."
+    check_int deploy_timeout 1
     return 0
 }
 
@@ -441,7 +406,7 @@ ship_retryable() {
 
 # preflight_feature — the developer's branch is shippable into ship_base.
 preflight_feature() {
-    local ahead origin_head hook owner rc=0
+    local ahead origin_head owner rc=0
     head_sha=$(git rev-parse HEAD 2>/dev/null)
     sha7=$(printf '%s' "$head_sha" | cut -c1-7)
 
@@ -453,7 +418,7 @@ preflight_feature() {
     fi
 
     if ! git rev-parse -q --verify "refs/remotes/origin/$ship_base" >/dev/null; then
-        pf_fail "origin/$ship_base doesn't exist. Push it (git push -u origin $ship_base), or git fetch origin if it's new. README.md has the first-push steps."
+        pf_fail "origin/$ship_base doesn't exist. Push it (git push -u origin $ship_base), or git fetch origin if it's new."
     elif [ -n "$branch" ]; then
         ahead=$(git rev-list --count "origin/$ship_base..HEAD")
         if [ "$ahead" -eq 0 ]; then
@@ -469,19 +434,9 @@ preflight_feature() {
     [ -n "$(git status --porcelain)" ] \
         && pf_warn "Uncommitted changes in your checkout aren't part of this ship. Only commits up to $sha7 ship."
 
-    if [ "$review_tooling" = skill ]; then
-        pf_ok "review: the ship skill's code-review.sh runs before the push"
-        review_doc_sources "$cfg_review_docs" "$head_sha"
-        [ -n "$doc_missing" ] \
-            && pf_warn "review_docs names paths that aren't in $sha7, so the review leaves them out:$doc_missing"
-    else
-        hook=$(git rev-parse --git-path hooks/pre-push)
-        if [ -f "$hook" ]; then
-            pf_ok "review: the project's pre-push hook"
-        else
-            pf_fail "The pre-push hook isn't installed, so nothing would review the push. Run: uv run pre-commit install"
-        fi
-    fi
+    review_doc_sources "$cfg_review_docs" "$head_sha"
+    [ -n "$doc_missing" ] \
+        && pf_warn "review_docs names paths that aren't in $sha7, so the review leaves them out:$doc_missing"
     # Named for the target too, so shipping one commit to two targets doesn't
     # reuse a branch whose PR (or auto-fix commit) belongs to the other.
     if [ "$ship_base" = "$ship_dev" ]; then
@@ -536,13 +491,8 @@ preflight_prod() {
         [ "$behind" -eq 0 ] \
             || pf_warn "origin/$ship_base has $behind commit(s) that $ship_dev doesn't (a hotfix?). Merge $ship_base into $ship_dev first, or the PR may conflict."
     fi
-    case "$cfg_ship_stage" in
-        push) pf_fail "A prod ship opens a PR from $ship_dev; ship_stage=push has nothing to do. Use open_pr or merge." ;;
-        verify_deploy) pf_fail "verify_deploy checks the dev deploy only. A prod ship stops at merge; use open_pr or merge." ;;
-    esac
-    if stage_at_least merge && [ "$cfg_pr_merge_method" != merge ]; then
-        pf_warn "A prod ship merges with a merge commit and keeps $ship_dev; pr_merge_method=$cfg_pr_merge_method applies to feature ships only."
-    fi
+    [ "$cfg_ship_stage" != push ] \
+        || pf_fail "ship_stage=push stops before the PR, and a prod ship has nothing to push. Use /ship $ship_base open_pr (or a later stage)."
     if [ -n "$notes_file" ]; then
         pf_ok "release notes: $notes_file"
     else
@@ -581,14 +531,18 @@ preflight() {
         t=$(command_program "$cfg_ship_setup") && tools="$tools $t"
         # A missing check program doesn't stop the ship: the review still
         # runs, but it can't run that check.
-        if [ "$review_tooling" = skill ]; then
-            while IFS= read -r check; do
-                t=$(command_program "$check") && ! command -v "$t" >/dev/null 2>&1 \
-                    && pf_warn "$t isn't on PATH, so the review can't run '$check' from fix_checks. Install it, or change fix_checks in $ship_rc."
-            done <<< "$(printf '%s\n' "$cfg_fix_checks" | tr ';' '\n')"
+        while IFS= read -r check; do
+            t=$(command_program "$check") && ! command -v "$t" >/dev/null 2>&1 \
+                && pf_warn "$t isn't on PATH, so the review can't run '$check' from fix_checks. Install it, or change fix_checks in $ship_rc."
+        done <<< "$(printf '%s\n' "$cfg_fix_checks" | tr ';' '\n')"
+    fi
+    if stage_at_least verify_deploy; then
+        if [ -z "$cfg_deploy_check" ]; then
+            pf_fail "verify_deploy needs deploy_check= in $ship_rc: a command that exits 0 once the deploy of DEPLOY_SHA is healthy."
+        else
+            t=$(command_program "$cfg_deploy_check") && tools="$tools $t"
         fi
     fi
-    stage_at_least verify_deploy && tools="$tools uv"
     for t in $tools; do
         command -v "$t" >/dev/null 2>&1 || pf_fail "$t isn't on PATH. Install it, then /ship again."
     done
@@ -623,9 +577,6 @@ preflight() {
     if stage_at_least merge && [ -n "$cfg_pr_reviewers" ]; then
         pf_warn "pr_reviewers is set, but at ship_stage=$cfg_ship_stage the PR is approved and auto-completed right away, so reviewers may never see it. Use open_pr to wait for them."
     fi
-    if ! $prod && stage_at_least verify_deploy; then
-        deploy_preflight
-    fi
 }
 
 # --- the config block --------------------------------------------------------------
@@ -643,29 +594,25 @@ setting_line() {
 
 print_block() {
     local key shown
-    shown="ship_stage ship_setup pr_host pr_merge_method pr_self_approve pr_reviewers review_agent
-review_model review_effort review_spec_model review_spec_effort fix_enabled
-fix_model fix_effort fix_max_iterations $(in_list fix_checks "$rc_known_keys" && echo fix_checks)
-$([ "$review_tooling" = skill ] && echo review_docs) ship_fix_retries agent_timeout pr_poll_interval pr_poll_timeout"
-    stage_at_least verify_deploy \
-        && shown="$shown deploy_pipeline deploy_provider deploy_project deploy_region deploy_name
-deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout deploy_smoke_timeout"
+    # The settings this ship's stage uses; any other key shows only when it
+    # isn't at its default.
+    shown="ship_stage"
+    $prod || shown="$shown ship_setup fix_checks review_model review_effort"
+    stage_at_least open_pr && shown="$shown pr_host pr_reviewers"
+    stage_at_least merge && shown="$shown pr_self_approve"
+    stage_at_least merge && ! $prod && shown="$shown pr_merge_method"
+    stage_at_least verify_deploy && shown="$shown deploy_check"
     echo "Ship $ship_id"
     if $prod; then
         printf '  %-24s %s\n' source "origin/$ship_dev @ $sha7"
-        printf '  %-24s %s\n' target "$ship_base (PROD release, PR titled 'prod 🚀')"
+        printf '  %-24s %s\n' target "$ship_base (PROD release, PR titled 'prod 🚀', merges with a merge commit)"
         printf '  %-24s %s\n' notes "${notes_file:-(generated commit list)}"
     else
         printf '  %-24s %s\n' source "${branch:-(detached)} @ $sha7"
         printf '  %-24s %s\n' snapshot "$snapshot"
         printf '  %-24s %s\n' worktree "$worktree"
         printf '  %-24s %s\n' target "$ship_base"
-        if [ "$review_tooling" = skill ]; then
-            printf '  %-24s %s\n' review "the ship skill's code-review.sh"
-            printf '  %-24s %s\n' docs "$(review_docs_summary) ← review_docs=$cfg_review_docs"
-        else
-            printf '  %-24s %s\n' review "the project's pre-push hook"
-        fi
+        printf '  %-24s %s\n' docs "$(review_docs_summary) ← review_docs=$cfg_review_docs"
     fi
     printf '  %-24s %s\n' log "$(ship_root)/$ship_id/ship.log"
     echo "Settings"
@@ -673,11 +620,15 @@ deploy_match deploy_proxy deploy_smoke deploy_run_grace deploy_poll_timeout depl
     for key in $shown; do
         setting_line "$key"
     done
-    # Any other override, so nothing overridden is hidden.
+    # Any other override or value that isn't the default, so nothing
+    # changed is hidden.
     # shellcheck disable=SC2086
     for key in $rc_known_keys; do
         in_list "$key" "$shown" && continue
-        case "$(cfg_source "$key")" in --set | env*) setting_line "$key" ;; esac
+        case "$(cfg_source "$key")" in
+            --set | env*) setting_line "$key" ;;
+            *) [ "$(cfg "$key")" = "$(rc_default "$key")" ] || setting_line "$key" ;;
+        esac
     done
     print_preflight
 }
@@ -731,16 +682,13 @@ fi
 # --- stages (run in the worktree) --------------------------------------------------
 
 # fail_stage <stage> <message> — records the failure and ends the ship. A PR
-# or deploy command failing because a login expired says so: a background run
-# can't log in again, and whatever is already armed stays armed.
+# command failing because a login expired says so: a background run can't log
+# in again, and whatever is already armed stays armed.
 fail_stage() {
     local stage=$1 msg=$2
     case "$stage" in
         open_pr | merge)
             host_auth_ok || msg="auth expired at $stage ($cfg_pr_host isn't logged in). $msg"
-            ;;
-        verify_deploy)
-            deploy_auth_ok || msg="auth expired at $stage (gcloud has no active account). $msg"
             ;;
     esac
     ship_event "$ship_dir" "$stage" failed "$msg"
@@ -752,27 +700,13 @@ copy_report() {
     return 0
 }
 
-# review_push — reviews and pushes the snapshot. In a repo with the scaffold's
-# review tooling the pre-push hook is the review; otherwise this skill's
-# code-review.sh runs first, and the push then runs the repo's own hooks.
-# Sets review_status to the skill review's exit status when that blocked.
+# review_push — runs code-review.sh, then pushes the snapshot, which runs the
+# repo's own hooks. Sets review_status to the review's exit status.
 review_push() {
     review_status=0
-    if [ "$review_tooling" = skill ]; then
-        bash "$review_sh" || review_status=$?
-        [ "$review_status" -eq 0 ] || return 1
-    fi
+    bash "$review_sh" || review_status=$?
+    [ "$review_status" -eq 0 ] || return 1
     git push -u origin "$snapshot"
-}
-
-# review_blocked — the last attempt failed in the review and it wrote a report.
-# The project's pre-push hook can't be told apart from the rest of git push,
-# so there a report is taken to mean the review blocked it.
-review_blocked() {
-    [ -f working/code-review-report.md ] || return 1
-    if [ "$review_tooling" = skill ]; then
-        [ "$review_status" -ne 0 ]
-    fi
 }
 
 commit_autofix() {
@@ -781,7 +715,7 @@ commit_autofix() {
 }
 
 stage_push() {
-    local attempt=0 retries=$cfg_ship_fix_retries msg p keep_out=()
+    local attempt=0 retries=$ship_fix_retries msg p keep_out=()
     cur_stage=push
     # git add -A already skips ignored paths, and naming one in an exclude
     # pathspec makes it warn and exit 1, so only unignored ones are named.
@@ -817,8 +751,8 @@ stage_push() {
             continue
         fi
         if [ -f "$autofix_marker" ]; then
-            msg="the review auto-fix is ready but ship_fix_retries=$retries is used up; the fix is uncommitted in the worktree"
-        elif review_blocked; then
+            msg="the review auto-fix is ready but its retry is used up; the fix is uncommitted in the worktree"
+        elif [ "$review_status" -ne 0 ] && [ -f working/code-review-report.md ]; then
             # Findings, or an agent that failed or timed out: the report says which.
             msg="the review blocked the push; see $ship_dir/code-review-report.md"
         elif [ "$review_status" -ne 0 ]; then
@@ -859,7 +793,7 @@ pr_body() {
         echo ""
         echo "Full report on the shipper's machine: \`.git/ship/$ship_id/code-review-report.md\`"
     else
-        echo "Every commit was already reviewed by an earlier passing push."
+        echo "Every commit was already reviewed by an earlier passing ship."
     fi
 }
 
@@ -1073,8 +1007,8 @@ $body")
         if [ "$elapsed" -ge "$cfg_pr_poll_timeout" ]; then
             fail_stage merge "not merged after ${cfg_pr_poll_timeout}s (pr_poll_timeout)${last_blocking:+: $last_blocking}. Auto-merge stays armed on $pr_url"
         fi
-        sleep "$cfg_pr_poll_interval"
-        elapsed=$((elapsed + cfg_pr_poll_interval))
+        sleep "$pr_poll_interval"
+        elapsed=$((elapsed + pr_poll_interval))
     done
 
     status_set "$ship_dir/status.json" blocking_reason ""
@@ -1085,16 +1019,24 @@ $body")
     ship_event "$ship_dir" merge passed "merged into $ship_base as $(printf '%s' "$merged_sha" | cut -c1-12)"
 }
 
+# stage_verify_deploy — runs deploy_check with the merge commit and the
+# target branch in its environment. Its exit status is the result; it waits
+# for the deploy itself, up to deploy_timeout.
 stage_verify_deploy() {
-    local rc=0
+    local rc=0 sha12
     cur_stage=verify_deploy
     merged_sha=$(status_get "$ship_dir/status.json" merge_sha)
-    ship_event "$ship_dir" verify_deploy running "looking for the $cfg_deploy_pipeline run on $(printf '%s' "$merged_sha" | cut -c1-12)"
-    deploy_verify "$merged_sha" || rc=$?
+    sha12=$(printf '%s' "$merged_sha" | cut -c1-12)
+    ship_event "$ship_dir" verify_deploy running "running deploy_check on $sha12"
+    echo "Running deploy_check: $cfg_deploy_check"
+    (
+        export DEPLOY_SHA=$merged_sha DEPLOY_BRANCH=$ship_base
+        with_timeout "$cfg_deploy_timeout" sh -c "$cfg_deploy_check"
+    ) || rc=$?
     case "$rc" in
-        0) ship_event "$ship_dir" verify_deploy passed "$deploy_msg" ;;
-        2) ship_event "$ship_dir" verify_deploy skipped "$deploy_msg" ;;
-        *) fail_stage verify_deploy "$deploy_msg" ;;
+        0) ship_event "$ship_dir" verify_deploy passed "deploy_check passed on $sha12" ;;
+        124) fail_stage verify_deploy "deploy_check timed out after ${cfg_deploy_timeout}s (deploy_timeout); see $ship_dir/ship.log" ;;
+        *) fail_stage verify_deploy "deploy_check failed (exit $rc); see $ship_dir/ship.log" ;;
     esac
 }
 
@@ -1150,10 +1092,10 @@ on_exit() {
     finish failed "failed at ${cur_stage:-push}"
 }
 
-# stage_done <stage> — this ship's events record <stage> as passed or
-# skipped, so a retry doesn't run it again.
+# stage_done <stage> — this ship's events record <stage> as passed, so a
+# retry doesn't run it again.
 stage_done() {
-    awk -F '\t' -v s="$1" '$2 == s && ($3 == "passed" || $3 == "skipped") { f = 1 } END { exit !f }' "$ship_dir/events"
+    awk -F '\t' -v s="$1" '$2 == s && $3 == "passed" { f = 1 } END { exit !f }' "$ship_dir/events"
 }
 
 # run_stages — everything after kickoff, in the worktree. The ship's own
@@ -1193,9 +1135,8 @@ load_ship() {
     set_prod
 }
 
-# start_detached — runs the ship's stages in the background. From the
-# worktree, so the resumed ship sources the snapshot's own
-# scripts/lib/common.sh and decisions.sh.
+# start_detached — runs the ship's stages in the background, from the
+# worktree (the checkout for a prod ship).
 start_detached() {
     cd "${worktree:-$repo_root}" || die "worktree $worktree is gone."
     nohup bash "$script_dir/ship.sh" --resume "$ship_id" > /dev/null 2>&1 &
@@ -1232,7 +1173,7 @@ restore_config() {
 
 # preflight_retry <stage> — what resuming at <stage> needs: a clean worktree,
 # origin still at the pushed commit (develop still at the planned one, for a
-# prod PR), and the logins.
+# prod PR), and the PR host login.
 preflight_retry() {
     local stage=$1 local_sha remote_sha
     if $prod; then
@@ -1255,9 +1196,6 @@ preflight_retry() {
         fi
     fi
     stage_at_least open_pr && [ "$stage" != verify_deploy ] && preflight_host
-    if stage_at_least verify_deploy; then
-        deploy_auth_ok || pf_fail "gcloud has no active account. Run \`! gcloud auth login\` in the session, then retry."
-    fi
     return 0
 }
 
@@ -1359,7 +1297,7 @@ if [ "$assume_yes" != true ]; then
     esac
 fi
 
-ship_prune "$cfg_ship_log_retention_days"
+ship_prune "$ship_log_retention_days"
 if [ -n "$leftover" ]; then
     ship_remove_leftovers "$leftover"
 fi
@@ -1372,12 +1310,9 @@ if ! $prod; then
     if [ -n "$prev" ]; then
         ledger_set "$snapshot" "$prev" || rollback "couldn't seed the review ledger."
     fi
-    ship_exclude_local
     git worktree add -q "$worktree" "$snapshot" || rollback "git worktree add failed."
-    # The settings files are ignored, so the worktree doesn't have them.
-    for p in "$ship_rc" .codereviewrc; do
-        [ -f "$p" ] && cp "$p" "$worktree/$p"
-    done
+    # .shiprc is excluded from git, so the worktree doesn't have it.
+    [ -f "$ship_rc" ] && cp "$ship_rc" "$worktree/$ship_rc"
     mkdir -p "$worktree/working"
     if [ -n "$cfg_ship_setup" ] && [ "$cfg_ship_setup" != none ]; then
         echo "Setting up the worktree: $cfg_ship_setup"

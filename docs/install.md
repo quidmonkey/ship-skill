@@ -6,9 +6,7 @@
 git clone git@github.com:quidmonkey/ship-skill.git ~/.claude/skills/ship
 ```
 
-The [scaffold skill](https://github.com/quidmonkey/scaffold-skill) clones it when it creates a project, and a scaffolded project's `make setup` clones it on a teammate's machine. To update, run `git -C ~/.claude/skills/ship pull`.
-
-The `version` in `SKILL.md` follows semver. The scaffold skill names the minimum version it needs and asks before pulling a newer one.
+To update, run `git -C ~/.claude/skills/ship pull`. The `version` in `SKILL.md` follows semver.
 
 ## Permission rules
 
@@ -36,11 +34,11 @@ The `ask` rule is the confirmation step. Without it, a session in auto mode can 
 - A git repo with an `origin` remote, a feature branch checked out, and `origin/develop` (or the branch you target). Nothing has to be copied into the repo.
 - `claude` and `git` on PATH.
 - `gh` or `az` for the `open_pr` stage and above.
-- `uv` and `gcloud` for `verify_deploy`.
+- For `verify_deploy`, whatever your `deploy_check` command runs.
 
 ## make targets
 
-`make ship` and the other `make ship*` targets come from `ship.mk`. A scaffolded project's `Makefile` includes it. To use them in another repo, add this after the `Makefile`'s first target:
+`make ship` and the other `make ship*` targets come from `ship.mk`. To use them, add this after the `Makefile`'s first target:
 
 ```make
 SHIP_SKILL ?= $(HOME)/.claude/skills/ship

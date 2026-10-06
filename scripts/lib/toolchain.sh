@@ -77,22 +77,19 @@ toolchain_valid_checks() {
     checks_kept=${checks_kept:-none}
 }
 
-# toolchain_init — in a repo on the skill's review with review_agent=claude,
-# detects the toolchain keys .shiprc doesn't set and appends them to it, with
-# a NOTE: line for /ship to relay. A failed or malformed answer saves nothing,
+# toolchain_init — detects the toolchain keys .shiprc doesn't set and appends
+# them to it, with a NOTE: line for /ship to relay. A failed or malformed answer saves nothing,
 # so the next ship tries again; until then the built-in defaults apply.
 toolchain_init() {
     local unset out status=0 setup checks from key found found_ship_setup found_fix_checks note=""
-    [ "$review_tooling" = skill ] || return 0
-    [ "$(ship_value review_agent)" = claude ] || return 0
     unset=$(toolchain_unset)
     [ -n "$unset" ] || return 0
     # Preflight reports a missing claude.
     command -v claude > /dev/null 2>&1 || return 0
     echo "Detecting this repo's install and check commands (first ship only, up to a minute)..." >&2
     # Headless and read-only, sandboxed like the review agents in code-review.sh.
-    out=$(with_timeout "$(ship_value agent_timeout)" claude -p "$toolchain_prompt" \
-        --model "$(ship_value fix_model)" --setting-sources user --permission-mode dontAsk \
+    out=$(with_timeout "$(rc_value agent_timeout)" claude -p "$toolchain_prompt" \
+        --model "$fix_model" --setting-sources user --permission-mode dontAsk \
         --tools "Read,Grep,Glob" --allowed-tools "Read,Grep,Glob" < /dev/null 2> /dev/null) || status=$?
     setup=$(toolchain_field SETUP "$out")
     checks=$(toolchain_field CHECKS "$out")

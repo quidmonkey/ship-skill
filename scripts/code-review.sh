@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Two-pass agentic code review. The ship skill's own copy of the scaffold
-# skill's templates/scripts/code-review.sh: ship.sh runs it in the ship
-# worktree before each push, in a repo without its own review tooling (see
-# lib/ship-config.sh). A scaffolded repo runs its copy as the pre-push hook.
-# Unlike the template, it doesn't assume the scaffold's docs/ layout: it finds
-# the project's documents itself (review_docs), and works with none.
+# Two-pass agentic code review. ship.sh runs it in the ship worktree before
+# each push. It finds the project's documents itself (review_docs), and works
+# with none.
 #   Pass 1: general review — correctness, security, missing tests, DRY,
 #           YAGNI, library leverage, fit with the codebase.
 #   Pass 2: conformance to the project's documents and the decisions
@@ -15,26 +12,24 @@
 # Commits are reviewed once: the last passing commit per branch is recorded in
 # .git/code-review-ledger (shared by every worktree, written under a lock), and
 # later pushes review only new commits since.
-# The full report is written to $report (gitignored).
+# The full report is written to $report (excluded from git).
 #
-# fix_enabled defaults to true: a failed review hands its REQUIRED findings
-# (both passes combined) to a single fix agent that fixes or disputes each one,
-# then a verification pass checks the fix, in a loop (fix_max_iterations
-# rounds). Fixes are left uncommitted for review; the push stays blocked either
+# A failed review hands its REQUIRED findings (both passes combined) to a
+# single fix agent that fixes or disputes each one, then a verification pass
+# checks the fix, in a loop of up to fix_max_iterations rounds (0 turns the
+# fix loop off). Fixes are left uncommitted; the push stays blocked either
 # way — a passing working tree isn't a passing commit yet.
 #
-# Config: .shiprc (key=value) — review_agent, review_model,
-#         review_effort, review_spec_model, review_spec_effort, enabled,
-#         command, fix_enabled, fix_agent, fix_model, fix_effort, fix_command,
-#         fix_checks, agent_timeout, review_docs. Any key can be
-#         overridden for one push with CR_<KEY>, e.g. CR_REVIEW_MODEL=sonnet.
-# Skip:   SKIP_CODE_REVIEW=true git push, or enabled=false in .shiprc.
-# Base:   REVIEW_BASE_BRANCH replaces the default branch as a branch's
-#         first-review base (ship.sh sets it to develop).
+# Config: .shiprc (key=value) — review_model, review_effort,
+#         fix_max_iterations, fix_checks, agent_timeout, review_docs. ship.sh
+#         validates them in its plan and passes one-run overrides as
+#         CR_<KEY>. The other agents' models are fixed in lib/common.sh.
+# Base:   REVIEW_BASE_BRANCH, the ship's target, is a branch's first-review
+#         base.
 #
 # If the fix loop below resolves every REQUIRED finding, this script still
 # exits non-zero (see $autofix_marker in lib/common.sh); ship.sh commits that
-# fix and runs it again, up to ship_fix_retries times.
+# fix and runs it again, once.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -43,19 +38,8 @@ source "$script_dir/lib/common.sh"
 # shellcheck source=lib/review-docs.sh
 source "$script_dir/lib/review-docs.sh"
 
-rc_file=".shiprc"
 report="working/code-review-report.md"
 
-# --- skip checks -------------------------------------------------------------
-
-case "${SKIP_CODE_REVIEW:-}" in
-    1 | true | TRUE | yes | YES)
-        echo "SKIP_CODE_REVIEW set — skipping code review."
-        exit 0
-        ;;
-esac
-
-review_agent=$(rc_value review_agent)
 # Set explicitly rather than inheriting the CLI's default model. Aliases
 # (opus, sonnet) still move to each new release; a full model ID pins exactly.
 # Pass 1 hunts for bugs nobody has named yet, the hardest job in the gate, so
@@ -63,26 +47,11 @@ review_agent=$(rc_value review_agent)
 # and a false REQUIRED costs a fix and a verification round.
 review_model=$(rc_value review_model)
 review_effort=$(rc_value review_effort)
-# Pass 2 and fix verification compare code against a stated doc or finding.
 # Every call gets an explicit effort: the CLI default moves between releases,
 # and effort levels don't mean the same amount of thinking across models.
-review_spec_model=$(rc_value review_spec_model)
-review_spec_effort=$(rc_value review_spec_effort)
-enabled=$(rc_value enabled)
-custom_cmd=$(rc_value command)
-
-# Auto-fix: after a failed review, hand the REQUIRED findings to a fix agent
-# that edits the working tree. On by default so a push keeps looping fix ->
-# verify until nothing is open; fixes are always left uncommitted.
-fix_enabled=$(rc_value fix_enabled)
-fix_agent=$(rc_value fix_agent)
-# The fixer works from findings that already name the file, the failure, and
-# the change needed, and a verification pass checks its work.
-fix_model=$(rc_value fix_model)
-# Not low: at low effort a fixer is more likely to report a fix done without
-# running the checks that exercise it.
-fix_effort=$(rc_value fix_effort)
-fix_cmd=$(rc_value fix_command)
+# Pass 2, fix verification and the fixer use the fixed review_spec_* and fix_*
+# choices from lib/common.sh.
+# Auto-fix rounds after a failed review; 0 turns the fix loop off.
 fix_max_iterations=$(rc_value fix_max_iterations)
 # The lint and test commands, ;-separated; empty when none apply. The fixer runs
 # them to check its work, and the reviewers may run them to confirm a finding.
@@ -94,81 +63,6 @@ agent_timeout=$(rc_value agent_timeout)
 # the project has no such documents.
 review_docs=$(rc_value review_docs)
 
-if [ "$enabled" = "false" ]; then
-    echo "Code review disabled in $rc_file — skipping."
-    exit 0
-fi
-
-# --- agent validation ---------------------------------------------------------
-# Misconfiguration fails closed: a bad rc file must block the push and surface,
-# not silently disable the gate. Only a missing CLI for a valid agent fails
-# open, so one machine without the tool doesn't block everyone's pushes.
-
-case "$review_agent" in
-    claude) ;;
-    custom)
-        if [ -z "$custom_cmd" ]; then
-            echo "ERROR: review_agent=custom requires command= in $rc_file — blocking push." >&2
-            exit 1
-        fi
-        ;;
-    *)
-        echo "ERROR: unknown review_agent '$review_agent' in $rc_file (claude | custom) — blocking push." >&2
-        exit 1
-        ;;
-esac
-
-case "$agent_timeout" in
-    '' | *[!0-9]* | 0)
-        echo "ERROR: agent_timeout must be a positive integer (seconds) in $rc_file — blocking push." >&2
-        exit 1
-        ;;
-esac
-
-for effort_key in review_effort review_spec_effort fix_effort; do
-    case "${!effort_key}" in
-        low | medium | high | xhigh | max | default) ;;
-        *)
-            echo "ERROR: unknown $effort_key '${!effort_key}' in $rc_file (low | medium | high | xhigh | max | default) — blocking push." >&2
-            exit 1
-            ;;
-    esac
-done
-
-# Validate the fix agent up front on the same fail-closed terms, but only when
-# auto-fix is on. A missing claude CLI is handled at fix time (fail-open).
-if [ "$fix_enabled" = "true" ]; then
-    case "$fix_agent" in
-        claude) ;;
-        custom)
-            if [ -z "$fix_cmd" ]; then
-                echo "ERROR: fix_agent=custom requires fix_command= in $rc_file — blocking push." >&2
-                exit 1
-            fi
-            ;;
-        *)
-            echo "ERROR: unknown fix_agent '$fix_agent' in $rc_file (claude | custom) — blocking push." >&2
-            exit 1
-            ;;
-    esac
-    case "$fix_max_iterations" in
-        '' | *[!0-9]*)
-            echo "ERROR: fix_max_iterations must be a positive integer in $rc_file — blocking push." >&2
-            exit 1
-            ;;
-    esac
-    if [ "$fix_max_iterations" -lt 1 ]; then
-        echo "ERROR: fix_max_iterations must be >= 1 in $rc_file — blocking push." >&2
-        exit 1
-    fi
-fi
-
-if [ "$review_agent" = "claude" ] && ! command -v claude >/dev/null 2>&1; then
-    echo "WARNING: 'claude' not found — skipping code review (fail-open)." >&2
-    echo "Install it, or set review_agent=custom with command= in $rc_file." >&2
-    exit 0
-fi
-
 # effort_flags_for <effort> sets $effort_flags: --effort <effort>, or nothing
 # for "default", which leaves the CLI's own.
 effort_flags_for() {
@@ -177,8 +71,7 @@ effort_flags_for() {
 }
 
 # run_review_agent <prompt> <model> <effort> prints the review to stdout; the
-# review must end with "VERDICT: PASS" or "VERDICT: FAIL" as its final line. A custom command receives
-# the prompt on stdin and ignores model and effort.
+# review must end with "VERDICT: PASS" or "VERDICT: FAIL" as its final line.
 # git status is allowed: the verification prompt needs it to see untracked files
 # the fixer added, and a headless -p run has no prompt to approve it with.
 # Both agents may also run the fix_checks commands (check_rules), so a review
@@ -207,36 +100,20 @@ check_rules() {
 run_review_agent() {
     local effort_flags
     effort_flags_for "$3"
-    case "$review_agent" in
-        claude)
-            # ${a[@]+...}: bash 3.2 treats an empty array as unbound under set -u.
-            with_timeout "$agent_timeout" claude -p "$1" --model "$2" ${effort_flags[@]+"${effort_flags[@]}"} "${claude_sandbox_flags[@]}" \
-                --tools "Read,Grep,Glob,Bash" \
-                --allowed-tools "Read,Grep,Glob,$git_rules$(check_rules)" < /dev/null
-            ;;
-        custom)
-            printf '%s\n' "$1" | with_timeout "$agent_timeout" sh -c "$custom_cmd"
-            ;;
-    esac
+    # ${a[@]+...}: bash 3.2 treats an empty array as unbound under set -u.
+    with_timeout "$agent_timeout" claude -p "$1" --model "$2" ${effort_flags[@]+"${effort_flags[@]}"} "${claude_sandbox_flags[@]}" \
+        --tools "Read,Grep,Glob,Bash" \
+        --allowed-tools "Read,Grep,Glob,$git_rules$(check_rules)" < /dev/null
 }
 
 # run_fix_agent reads the fix prompt as $1 and edits the working tree in place.
-# Unlike the review agent it gets write tools; a custom command receives the
-# prompt on stdin instead.
+# Unlike the review agent it gets write tools.
 run_fix_agent() {
-    local effort_flags allowed
+    local effort_flags
     effort_flags_for "$fix_effort"
-    allowed="Read,Edit,Write,Grep,Glob,$git_rules$(check_rules)"
-    case "$fix_agent" in
-        claude)
-            with_timeout "$agent_timeout" claude -p "$1" --model "$fix_model" ${effort_flags[@]+"${effort_flags[@]}"} "${claude_sandbox_flags[@]}" \
-                --tools "Read,Edit,Write,Grep,Glob,Bash" \
-                --allowed-tools "$allowed" < /dev/null
-            ;;
-        custom)
-            printf '%s\n' "$1" | with_timeout "$agent_timeout" sh -c "$fix_cmd"
-            ;;
-    esac
+    with_timeout "$agent_timeout" claude -p "$1" --model "$fix_model" ${effort_flags[@]+"${effort_flags[@]}"} "${claude_sandbox_flags[@]}" \
+        --tools "Read,Edit,Write,Grep,Glob,Bash" \
+        --allowed-tools "Read,Edit,Write,Grep,Glob,$git_rules$(check_rules)" < /dev/null
 }
 
 # fix_check_list — fix_checks, one trimmed command per line; none lists nothing.
@@ -247,52 +124,28 @@ fix_check_list() {
 
 # --- diff range --------------------------------------------------------------
 
-zero_sha=0000000000000000000000000000000000000000
 # Empty-tree hash: diff base for a brand-new repository's first push.
 empty_tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 
-# Under pre-push, pre-commit exports the refs being pushed; prefer them so the
-# review covers what actually goes to the remote, not the checked-out branch.
 # Pin HEAD once up front: the passes run minutes apart, and a commit made
 # mid-review must never be recorded as reviewed.
-to_ref="${PRE_COMMIT_TO_REF:-}"
-if [ "$to_ref" = "$zero_sha" ]; then
-    echo "Ref deletion — nothing to review."
-    exit 0
-fi
-head_sha=${to_ref:-$(git rev-parse HEAD)}
-branch="${PRE_COMMIT_LOCAL_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
-branch=${branch#refs/heads/}
-base_branch=${REVIEW_BASE_BRANCH:-$(default_branch)}
+head_sha=$(git rev-parse HEAD)
+branch=$(git rev-parse --abbrev-ref HEAD)
+base_branch=${REVIEW_BASE_BRANCH:-develop}
 
 last_reviewed=$(ledger_get "$branch")
-
-from_ref="${PRE_COMMIT_FROM_REF:-}"
-[ "$from_ref" = "$zero_sha" ] && from_ref=""
-# A remote sha we don't have locally (diverged force-push) can't be a base.
-if [ -n "$from_ref" ] && ! git cat-file -e "$from_ref" 2>/dev/null; then
-    from_ref=""
-fi
 
 if [ -n "$last_reviewed" ] && git merge-base --is-ancestor "$last_reviewed" "$head_sha" 2>/dev/null; then
     # Reviewed before: only new commits since the last passing review.
     base=$last_reviewed
-elif [ -n "$from_ref" ]; then
-    # pre-push: exactly the commits the remote doesn't have yet.
-    base=$from_ref
-elif [ -z "$to_ref" ] && base=$(git rev-parse -q --verify '@{upstream}' 2>/dev/null); then
-    # Manual run (make review): everything not yet pushed upstream.
-    :
-elif base=$(git merge-base "origin/$base_branch" "$head_sha" 2>/dev/null) \
-    || base=$(git merge-base "$base_branch" "$head_sha" 2>/dev/null); then
-    # First review of a branch: the whole branch vs the default branch.
+elif base=$(git merge-base "origin/$base_branch" "$head_sha" 2>/dev/null); then
+    # First review of a branch: the whole branch vs the target.
     :
 elif [ -z "$(git for-each-ref refs/remotes)" ]; then
     # Brand-new repository with no remote branches: everything is new.
     base=$empty_tree
 else
-    echo "ERROR: cannot determine a review base — branch '$base_branch' not found." >&2
-    echo "Set the remote default branch (git remote set-head origin -a) and retry." >&2
+    echo "ERROR: cannot determine a review base — origin/$base_branch not found." >&2
     exit 1
 fi
 range="$base..$head_sha"
@@ -325,9 +178,7 @@ rm -f "$autofix_marker"
     echo
     echo "- Branch: \`$branch\`"
     echo "- Range: \`$range\`"
-    echo "- Review agent: \`$review_agent\`"
-    [ "$review_agent" = "claude" ] && echo "- Models: pass 1 \`$review_model\` (effort \`$review_effort\`), pass 2 and verification \`$review_spec_model\` (effort \`$review_spec_effort\`), fix \`$fix_model\` (effort \`$fix_effort\`)"
-    [ "$fix_enabled" = "true" ] && echo "- Fix agent: \`$fix_agent\`"
+    echo "- Models: pass 1 \`$review_model\` (effort \`$review_effort\`), pass 2 and verification \`$review_spec_model\` (effort \`$review_spec_effort\`), fix \`$fix_model\` (effort \`$fix_effort\`)"
     echo "- Documents: $(review_docs_summary)"
     echo "- Date: $(date '+%Y-%m-%d %H:%M:%S')"
 } > "$report"
@@ -376,7 +227,7 @@ show_pass() {
 }
 
 # The most recent review's or verification's open findings, and the fixer's
-# latest summary. Stable gitignored files rather than temp
+# latest summary. Stable files excluded from git rather than temp
 # files: the agents read them, and a path inside the project needs no extra
 # directory access in a headless run.
 findings_file="working/code-review-findings.md"
@@ -611,11 +462,6 @@ EOF
 # loop can stop.
 apply_fixes() {
     local label=$1 fix_prompt status=0 verify_rule
-    if [ "$fix_agent" = "claude" ] && ! command -v claude >/dev/null 2>&1; then
-        echo "WARNING: 'claude' not found — cannot auto-fix. Fix REQUIRED findings manually." >&2
-        return 1
-    fi
-
     if [ -n "$checks_block" ]; then
         verify_rule="- Verify before finishing: run each of these, adding arguments where they
   help (for example --files <changed files>). A fix that breaks them is not a fix.
@@ -667,7 +513,7 @@ it could not be fixed. Keep it concise.
 EOF
 
     echo ""
-    echo "fix_enabled=true — applying fixes for REQUIRED findings with '$fix_agent'$label"
+    echo "Applying fixes for REQUIRED findings$label"
     echo "(this can take a few minutes)..."
     run_fix_agent "$fix_prompt" > "$fix_summary_file" 2>&1 || status=$?
     # Carry on to verification either way: it judges whatever the fixer left.
@@ -763,7 +609,7 @@ echo ""
 echo "Code review FAILED — push blocked."
 echo "Full report: $report"
 
-if [ "$fix_enabled" != "true" ]; then
+if [ "$fix_max_iterations" -eq 0 ]; then
     echo "Fix the REQUIRED findings, commit, and push again."
     exit 1
 fi
@@ -786,14 +632,13 @@ while :; do
             # Nothing to commit: every finding was disputed and the dispute
             # upheld. Getting past the gate from here is a human decision.
             echo "Every REQUIRED finding was disputed and the verifier accepted the disputes;"
-            echo "no code changed, so this push is still blocked. Read $report and decide:"
-            echo "push again for a fresh review, or skip the review for this push yourself."
+            echo "no code changed, so this push is still blocked. Read $report and decide"
+            echo "whether to ship again for a fresh review."
             exit 1
         fi
         echo "Auto-fix cleared all REQUIRED findings after $iteration iteration(s)."
         echo "The fixes are in the working tree, uncommitted — this push is still blocked."
-        echo "Review the diff, commit the fixes, and push again. If this push came from"
-        echo "make ship, it commits the fix and pushes again on its own (ship_fix_retries)."
+        echo "The ship commits the fix and pushes again on its own."
         echo "Report: $report"
         touch "$autofix_marker"
         exit 1

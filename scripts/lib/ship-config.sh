@@ -1,52 +1,26 @@
 # shellcheck shell=bash
-# Loads the shared helpers and adds the ship settings to them. Sourced by
-# ship.sh and set-ship-stage.sh, not executed.
-#
-# The review tooling comes from one of two places:
-#   project  the repo has the scaffold skill's scripts/lib/common.sh (it sets
-#            ship_contract). Its pre-push hook reviews each push, and ship.sh
-#            sources its common.sh: rc_* (config), ledger_* (review ledger),
-#            with_timeout and autofix_marker. A ship_contract other than the
-#            one below is refused rather than half-working.
-#   skill    any other repo. ship.sh sources this skill's lib/common.sh and
-#            runs this skill's code-review.sh in the worktree before each push.
+# Loads the shared helpers and the ship's settings file. Sourced by ship.sh
+# and set-ship-stage.sh, not executed.
 
 # Constants below are used by the scripts that source this file.
 # shellcheck disable=SC2034
-
-ship_contract_required=1
 
 skill_scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 project_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "ERROR: not inside a git repository." >&2
     exit 1
 }
-project_common="$project_root/scripts/lib/common.sh"
-if [ -f "$project_common" ] && grep -q '^ship_contract=' "$project_common"; then
-    review_tooling=project
-    # shellcheck source=/dev/null
-    source "$project_common"
-    if [ "$ship_contract" != "$ship_contract_required" ]; then
-        echo "ERROR: this project's scripts/lib/common.sh has ship_contract=$ship_contract, and the ship skill needs $ship_contract_required." >&2
-        echo "Update whichever is older: git -C ~/.claude/skills/ship pull, or the project's scripts/ from the scaffold skill's templates." >&2
-        exit 1
-    fi
-else
-    review_tooling=skill
-    # shellcheck source=common.sh
-    source "$skill_scripts/lib/common.sh"
-fi
-review_sh="$skill_scripts/code-review.sh"
+# shellcheck source=common.sh
+source "$skill_scripts/lib/common.sh"
 # shellcheck source=review-docs.sh
 source "$skill_scripts/lib/review-docs.sh"
 # shellcheck source=toolchain.sh
 source "$skill_scripts/lib/toolchain.sh"
-decisions_sh="$project_root/scripts/decisions.sh"
-[ -f "$decisions_sh" ] || decisions_sh="$skill_scripts/decisions.sh"
+review_sh="$skill_scripts/code-review.sh"
+decisions_sh="$skill_scripts/decisions.sh"
 
-# The ship's personal settings. ship_rc_init creates the file and ignores it
-# in .gitignore. A project with its own review tooling keeps its review keys
-# in its .codereviewrc (see rc_file_of).
+# The ship's personal settings. ship_rc_init creates the file and keeps it
+# out of git through .git/info/exclude.
 ship_rc=.shiprc
 
 # ship_local_paths — paths a ship writes that must never be committed: the
@@ -54,7 +28,6 @@ ship_rc=.shiprc
 # so a repo that tracks its own working/ keeps committing it.
 ship_local_paths="working/code-review-report.md working/code-review-findings.md
 working/code-review-fix-summary.md $autofix_marker $ship_rc"
-[ "$review_tooling" = project ] && ship_local_paths="$ship_local_paths .codereviewrc"
 
 # ship_exclude_local — adds each of ship_local_paths to the repo's local
 # excludes (.git/info/exclude, never committed) unless it's already ignored,
@@ -76,107 +49,20 @@ ship_exclude_local() {
 # changes it), and the branch a prod ship (--target main or master) releases.
 ship_base=develop
 
-ship_keys="review_docs ship_stage ship_setup ship_fix_retries ship_log_retention_days
-ship_notify pr_host pr_merge_method pr_self_approve pr_poll_interval
-pr_poll_timeout pr_reviewers deploy_pipeline deploy_provider deploy_project
-deploy_region deploy_name deploy_match deploy_proxy deploy_smoke
-deploy_run_grace deploy_poll_timeout deploy_smoke_timeout"
-rc_known_keys="$rc_known_keys $ship_keys"
+# Fixed ship behavior. One auto-fix retry is enough: the fix loop has already
+# converged the fix, so a second is only needed if the fresh commit's full
+# review turns up something new.
+ship_fix_retries=1
+pr_poll_interval=15
+ship_log_retention_days=30
 
-# rc_file_of <key> — the file <key> is set in. A project with its own review
-# tooling reads its review keys from .codereviewrc, so the ship does too;
-# every other key is in .shiprc.
-rc_file_of() {
-    if [ "$review_tooling" = project ] && ! in_list "$1" "$ship_keys"; then
-        echo .codereviewrc
-    else
-        echo "$ship_rc"
-    fi
-}
-
-# ship_value <key> — rc_value, read from rc_file_of <key>.
-ship_value() {
-    local v
-    v=$(rc_get "$1" "$(rc_file_of "$1")")
-    if [ -n "$v" ]; then
-        printf '%s\n' "$v"
-    else
-        rc_default "$1"
-    fi
-}
-
-# ship_rc_init — creates .shiprc from shiprc.template when it's missing, then
-# ignores it (see ship_rc_ignore). Prints a NOTE: line for each change, for
-# /ship to relay.
+# ship_rc_init — creates .shiprc from shiprc.template when it's missing, with
+# a NOTE: line for /ship to relay, then excludes it and the review's files
+# from git (ship_exclude_local). Nothing is committed.
 ship_rc_init() {
     if [ ! -f "$ship_rc" ]; then
         cp "$skill_scripts/../shiprc.template" "$ship_rc"
-        echo "NOTE: created $ship_rc with the default ship settings. Edit it to change them."
+        echo "NOTE: created $ship_rc with the default ship settings, kept out of git by .git/info/exclude. Edit it to change them."
     fi
-    ship_rc_ignore
-}
-
-# ship_rc_ignore — adds .shiprc to .gitignore unless something already ignores
-# it or it's tracked, and commits that on the current branch. The commit names
-# only .gitignore, so nothing else staged goes with it. It's left uncommitted
-# when .gitignore has the developer's own changes, or HEAD isn't a branch a
-# ship ships from.
-ship_rc_ignore() {
-    local branch why=""
-    git check-ignore -q "$ship_rc" && return 0
-    [ -n "$(git ls-files -- "$ship_rc")" ] && return 0
-    [ -n "$(git status --porcelain -- .gitignore)" ] && why="it has uncommitted changes of yours"
-    if [ -s .gitignore ] && [ -n "$(tail -c 1 .gitignore)" ]; then
-        echo >> .gitignore
-    fi
-    printf '# Personal settings for the ship skill\n%s\n' "$ship_rc" >> .gitignore
-    branch=$(git symbolic-ref -q --short HEAD)
-    if [ -z "$why" ]; then
-        if [ -z "$branch" ]; then
-            why="HEAD is detached"
-        elif in_list "$branch" "${ship_dev:-$ship_base} $ship_base main master"; then
-            why="you're on $branch"
-        fi
-    fi
-    if [ -z "$why" ]; then
-        if git add -- .gitignore && git commit -q -m "Ignore $ship_rc, the ship skill's personal settings" -- .gitignore >/dev/null; then
-            echo "NOTE: added $ship_rc to .gitignore and committed it on $branch ($(git rev-parse --short HEAD))."
-            return 0
-        fi
-        why="git commit failed"
-    fi
-    echo "NOTE: added $ship_rc to .gitignore but didn't commit it, because $why. Commit .gitignore yourself."
-}
-
-# rc_default_extra <key> — the built-in default for a ship key. The project's
-# rc_default calls it for any key it doesn't know.
-rc_default_extra() {
-    case "$1" in
-        ship_stage) echo open_pr ;;
-        # The skill's review finds the project's documents (lib/review-docs.sh).
-        review_docs) echo auto ;;
-        # Run in a new worktree before the push, so the review's fixer and the
-        # repo's hooks have its dependencies; none runs nothing. The first ship
-        # usually sets it in .shiprc (lib/toolchain.sh), so this is the fallback.
-        ship_setup) [ -f pyproject.toml ] && echo 'uv sync -q' ;;
-        ship_fix_retries) echo 1 ;;
-        ship_log_retention_days) echo 30 ;;
-        ship_notify) echo none ;;
-        pr_host)
-            case "$(git remote get-url origin 2>/dev/null)" in
-                *github.com*) echo gh ;;
-                *) echo az ;;
-            esac
-            ;;
-        pr_merge_method) echo squash ;;
-        pr_self_approve) echo true ;;
-        pr_poll_interval) echo 15 ;;
-        pr_poll_timeout) echo 1800 ;;
-        deploy_region) echo us-central1 ;;
-        deploy_match) echo time ;;
-        deploy_proxy) echo false ;;
-        deploy_run_grace) echo 300 ;;
-        deploy_poll_timeout) echo 3600 ;;
-        deploy_smoke_timeout) echo 900 ;;
-    esac
+    ship_exclude_local
 }

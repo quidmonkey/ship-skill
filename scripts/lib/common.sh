@@ -1,38 +1,38 @@
 # shellcheck shell=bash
-# Shared helpers for code-review.sh and ship.sh. The ship skill's own copy of
-# the scaffold skill's templates/scripts/lib/common.sh, used in a repo that
-# doesn't have its own (see ship-config.sh). Keep the rc_*, ledger_* and
-# with_timeout helpers in step with that template, except that this copy reads
-# .shiprc where the template reads .codereviewrc. Sourced, not executed — no
-# shebang, no set -u here (each caller sets its own options).
+# Shared helpers for code-review.sh and ship.sh: settings (rc_*), the review
+# ledger (ledger_*) and with_timeout. Sourced, not executed — no shebang, no
+# set -u here (each caller sets its own options).
 
 # Constants below are used by the scripts that source this file.
 # shellcheck disable=SC2034
 
-# The version of what the ship skill relies on here: rc_* (with the
-# rc_default_extra hook), ledger_*, with_timeout and autofix_marker. The ship
-# skill refuses to run against a different version, so bump it with any change
-# to those, and update the ship skill to match.
-ship_contract=1
-
 # code-review.sh's fix/verify loop touches this file instead of just
 # exiting when it resolves every REQUIRED finding — the fixes are still
-# uncommitted (fix_enabled never commits or pushes on its own), but ship.sh
-# looks for this file right after a blocked `git push` to know whether it's
+# uncommitted (the fix loop never commits or pushes on its own), but ship.sh
+# looks for this file right after a failed review to know whether it's
 # looking at an unfixable failure or a fix sitting in the working tree ready
-# to be committed. Gitignored, like the report.
+# to be committed. Excluded from git, like the report.
 autofix_marker="working/autofix-pending.marker"
 
-# Every review key .shiprc understands. The ship skill appends its own
-# keys when it sources this file. An override (--set or CR_<KEY>) naming
+# Every key .shiprc understands. An override (--set or CR_<KEY>) naming
 # anything else is a typo and fails, so it can't be silently ignored.
-rc_known_keys="review_agent review_model review_effort review_spec_model
-review_spec_effort enabled command fix_enabled fix_agent fix_model fix_effort
-fix_command fix_max_iterations fix_checks agent_timeout"
+rc_known_keys="ship_stage pr_reviewers pr_host pr_merge_method pr_self_approve
+pr_poll_timeout ship_setup fix_checks review_docs review_model review_effort
+fix_max_iterations agent_timeout deploy_check deploy_timeout ship_notify"
+
+# Fixed choices for the review's other agents. Pass 2 and fix verification
+# compare code against a stated doc or finding, and the fixer works from
+# findings that already name the file, the failure and the change needed, so
+# neither needs pass 1's model. Not low effort: at low effort a fixer is more
+# likely to report a fix done without running the checks that exercise it.
+review_spec_model=sonnet
+review_spec_effort=medium
+fix_model=sonnet
+fix_effort=medium
 
 # rc_env_name <key> — the environment variable that overrides <key>: CR_ plus
-# the key in uppercase. The prefix keeps generic keys like `enabled` and
-# `command` from colliding with unrelated variables.
+# the key in uppercase. The prefix keeps the keys from colliding with
+# unrelated variables.
 rc_env_name() {
     printf 'CR_%s\n' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
 }
@@ -57,22 +57,33 @@ rc_get() {
 
 # rc_default <key> — the built-in default, used when no override or rc line
 # sets a value. An absent .shiprc behaves exactly like the template.
-# Keys this file doesn't know go to rc_default_extra when a caller defines it
-# (the ship skill does, for its keys).
 rc_default() {
     case "$1" in
-        review_agent | fix_agent) echo claude ;;
         review_model) echo opus ;;
         review_effort) echo high ;;
-        review_spec_effort | fix_effort) echo medium ;;
-        review_spec_model | fix_model) echo sonnet ;;
-        enabled | fix_enabled) echo true ;;
         fix_max_iterations) echo 2 ;;
         agent_timeout) echo 900 ;;
         # Commands the fix agent runs to check its work, separated by ;. Each
         # one is also what the agent is allowed to run, with any arguments.
         fix_checks) [ -f pyproject.toml ] && echo 'uv run pre-commit;uv run pytest' ;;
-        *) declare -F rc_default_extra >/dev/null && rc_default_extra "$1" ;;
+        # The review finds the project's documents (lib/review-docs.sh).
+        review_docs) echo auto ;;
+        ship_stage) echo open_pr ;;
+        # Run in a new worktree before the push, so the review's fixer and the
+        # repo's hooks have its dependencies; none runs nothing. The first ship
+        # usually sets it in .shiprc (lib/toolchain.sh), so this is the fallback.
+        ship_setup) [ -f pyproject.toml ] && echo 'uv sync -q' ;;
+        ship_notify) echo none ;;
+        pr_host)
+            case "$(git remote get-url origin 2>/dev/null)" in
+                *github.com*) echo gh ;;
+                *) echo az ;;
+            esac
+            ;;
+        pr_merge_method) echo squash ;;
+        pr_self_approve) echo true ;;
+        pr_poll_timeout) echo 1800 ;;
+        deploy_timeout) echo 3600 ;;
     esac
 }
 
@@ -122,14 +133,6 @@ rc_closest_key() {
         }
         { s = lev(w, $0); if (best == "" || s < bestscore) { best = $0; bestscore = s } }
         END { print best }'
-}
-
-# default_branch — the repo's default branch per origin/HEAD, falling back to
-# main if the remote HEAD ref isn't set locally (git remote set-head origin -a).
-default_branch() {
-    local b
-    b=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
-    echo "${b:-main}"
 }
 
 # rc_set <key> <value> [rc-file] — writes key=value into an rc file, replacing
@@ -227,8 +230,8 @@ with_timeout() {
     fi
     flag=$(mktemp)
     rm -f "$flag"
-    # <&0: a background job's stdin is otherwise /dev/null, and custom agents
-    # read their prompt from stdin.
+    # <&0: a background job's stdin is otherwise /dev/null, and the command
+    # may read from stdin.
     "$@" <&0 &
     pid=$!
     # Polls rather than one long sleep, so the watchdog exits within a second

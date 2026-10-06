@@ -17,7 +17,7 @@
 
 status_keys="id source_branch snapshot_branch snapshot_sha worktree repo_root
 target_branch ship_stage stage state message blocking_reason pr_url pr_id
-pr_reviewers auto_merge merge_sha deploy_run_url log started_at finished_at"
+pr_reviewers auto_merge merge_sha log started_at finished_at"
 
 # ship_root — absolute path of the directory holding every ship's files.
 ship_root() {
@@ -104,7 +104,7 @@ status_config_get() {
 # osascript on macOS, a toast through powershell.exe on Windows (Git Bash or
 # WSL), notify-send on Linux. Does nothing when none of them is installed.
 ship_notify() {
-    [ "$(ship_value ship_notify)" = desktop ] || return 0
+    [ "$(rc_value ship_notify)" = desktop ] || return 0
     local msg q="'"
     msg=$(printf '%s' "$1" | tr "\"\\\\" "'/")
     if command -v osascript >/dev/null 2>&1; then
@@ -231,7 +231,6 @@ ship_summary() {
     [ -n "$reason" ] && printf '    waiting on: %s\n' "$reason"
     [ -n "$(status_get "$f" pr_url)" ] && printf '    PR: %s\n' "$(status_get "$f" pr_url)"
     [ -n "$(status_get "$f" merge_sha)" ] && printf '    merge commit: %s\n' "$(status_get "$f" merge_sha)"
-    [ -n "$(status_get "$f" deploy_run_url)" ] && printf '    deploy run: %s\n' "$(status_get "$f" deploy_run_url)"
     [ -f "$1/code-review-report.md" ] && printf '    review report: %s\n' "$1/code-review-report.md"
     printf '    log: %s\n' "$(status_get "$f" log)"
 }

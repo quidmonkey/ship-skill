@@ -1,8 +1,7 @@
 # shellcheck shell=bash
 # Finds the documents that state a project's intended behavior, for the
-# skill's code review and the ship plan. Repos keep them in different places,
-# or have none, so review_docs=auto checks the common ones rather than
-# assuming the scaffold's docs/. Sourced, not executed.
+# code review and the ship plan. Repos keep them in different places, or have
+# none, so review_docs=auto checks the common ones. Sourced, not executed.
 
 # Constants below are used by the scripts that source this file.
 # shellcheck disable=SC2034
