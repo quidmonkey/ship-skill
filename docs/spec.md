@@ -9,7 +9,7 @@ The ship skill lives at `~/.claude/skills/ship` and is its own git repo (`git@gi
 The review tooling comes from one of two places, and `lib/ship-config.sh` picks it when it's sourced:
 
 - **Project.** A scaffolded repo keeps the review half of the pipeline, written by the scaffold skill: `scripts/code-review.sh` (the pre-push hook), `scripts/decisions.sh` and `scripts/lib/common.sh`. `common.sh` is the contract between the two repos. The ship skill sources it from the project root and uses `rc_*`, `ledger_*`, `with_timeout` and `autofix_marker`. It carries `ship_contract=1`, and `lib/ship-config.sh` refuses to run against any other value. The pre-push hook is the review.
-- **Skill.** Any other repo, including one whose `scripts/lib/common.sh` has no `ship_contract` line. The skill sources its own `scripts/lib/common.sh` and runs its own `scripts/code-review.sh` in the worktree before each push. Both are copies of the scaffold skill's templates. The review copy adds `fix_checks`, the lint and test commands its fixer may run, in place of the template's fixed `uv run pytest`, `uv run pre-commit` and `make run-check`. It also finds the repo's documents instead of assuming the scaffold's `docs/` layout (see Documented intent).
+- **Skill.** Any other repo, including one whose `scripts/lib/common.sh` has no `ship_contract` line. The skill sources its own `scripts/lib/common.sh` and runs its own `scripts/code-review.sh` in the worktree before each push. Both are copies of the scaffold skill's templates. The review copy adds `fix_checks`, the lint and test commands its reviewers and fixer may run, in place of the template's fixed `uv run pytest`, `uv run pre-commit` and `make run-check`. It also finds the repo's documents instead of assuming the scaffold's `docs/` layout (see Documented intent).
 
 `scripts/decisions.sh` comes from the project when it has one and from the skill otherwise. The ship keys, their defaults (through the `rc_default_extra` hook in `rc_default`) and `ship_base` live in `lib/ship-config.sh`.
 
@@ -41,6 +41,7 @@ The new design moves all of it into a separate git worktree, so none of it touch
 - Commits, squash messages, PR descriptions and release notes from a ship carry no agent attribution: no `Co-Authored-By` trailer and no "Generated with" line.
 - Only `.shiprc` and `.codereviewrc` are copied into the worktree. There's no setting for copying other gitignored files.
 - The ship's settings are in `.shiprc`, ignored through a committed `.gitignore` line. The first ship in a repo creates both and says so in the session.
+- A developer never has to configure the toolchain. The first feature ship detects `ship_setup` and `fix_checks` with one read-only agent call and saves them in `.shiprc`; it isn't repeated on every ship, so plans stay fast and the plan and kickoff hash the same settings. Giving the review agents unrestricted Bash, so they could work out the commands on each ship, was rejected: the worktree isn't a sandbox.
 - Repos the scaffold didn't create get the ship pipeline through a documented manual install.
 - Writes to the review ledger are locked, and a branch and commit can't be shipped twice at the same time.
 - Every `.shiprc` setting can be overridden for one run with `--set key=value` (or `SET=` from make) or a `CR_<KEY>` environment variable.
@@ -69,6 +70,7 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 | `scripts/lib/ship-config.sh` (this skill) | Picks the project's tooling or the skill's (see Packaging), checks `ship_contract`, adds the ship keys and their defaults, sets `ship_base`, creates `.shiprc` and commits it to `.gitignore` (see Configuration), reads each key from `.shiprc` or, for a project's review keys, its `.codereviewrc`, and adds the review's report files under `working/` to `.git/info/exclude` when nothing ignores them |
 | `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` (this skill) | The review tooling for repos without their own |
 | `scripts/lib/review-docs.sh` (this skill) | Finds the documents of intended behavior for the skill's review and the plan's `docs` line (see Documented intent) |
+| `scripts/lib/toolchain.sh` (this skill) | Detects `ship_setup` and `fix_checks` on a repo's first ship and saves them in `.shiprc` (see Configuration) |
 | `tests/e2e.sh` (this skill) | End-to-end checks up to the push stage in throwaway repos, with stubbed review and fix agents |
 | `scripts/lib/ship-status.sh` (this skill) | Status, event and log helpers, retention pruning, and the status, stop and watch commands |
 | `scripts/lib/ship-deploy.sh` (this skill) | Deploy verification: find the run, health check, smoke test |
@@ -84,7 +86,7 @@ The stage is resolved like any other setting (see Overrides): `/ship merge` is s
 
 ### 1. Plan and confirm (read-only, a few seconds)
 
-`ship.sh --plan` does steps 1 to 4. It doesn't prune logs, make branches or worktrees, or write to `.git/ship/`. The one thing it may create is `.shiprc` and its `.gitignore` commit, on a repo's first ship (see Configuration), before it reads HEAD.
+`ship.sh --plan` does steps 1 to 4. It doesn't prune logs, make branches or worktrees, or write to `.git/ship/`. The one thing it may create is `.shiprc` and its `.gitignore` commit, on a repo's first ship (see Configuration), before it reads HEAD. On that ship it also detects the toolchain into `.shiprc`.
 
 1. Read and validate `.shiprc`, and resolve the stage.
 2. Refuse to continue if HEAD is detached, if the current branch is `develop` or `main`, or if the branch has no commits ahead of `origin/develop`. Warn, but don't block, if there are uncommitted changes. They aren't part of the ship. Also refuse if a running ship already has the same source branch and HEAD SHA. A running ship is one with a live `pid` and no `finished_at`.
@@ -121,7 +123,7 @@ The snapshot freezes the commit being shipped. Later commits on the developer's 
 ### 3. Review, fix, push (in the worktree)
 
 1. Review, then push. With the skill's tooling, run its `code-review.sh` in the worktree, then `git push -u origin <snapshot>`, which runs the repo's own hooks. With the project's tooling, `git push` alone: the pre-push hook runs the two-pass review.
-2. If the push is blocked and the fix loop left `working/autofix-pending.marker`, commit the fix automatically with the existing message and push again, up to `ship_fix_retries` times. There's no confirmation prompt: the working tree belongs to the ship, and the re-push runs the full review again.
+2. If the push is blocked and the fix loop left `working/autofix-pending.marker`, commit the fix automatically with the existing message and push again, up to `ship_fix_retries` times. The commit runs the repo's pre-commit hook. A hook that rewrites files, such as a formatter, fails the first try; the ship stages what it changed and commits once more, and the re-push reviews it with the fix. A hook that still rejects the commit fails the ship with a message naming the hook. There's no confirmation prompt: the working tree belongs to the ship, and the re-push runs the full review again.
 3. If the push is blocked with REQUIRED findings still open, copy `working/code-review-report.md` into the ship directory, set the state to `failed`, and keep the worktree for inspection.
 
 ### 4. open_pr
@@ -188,7 +190,8 @@ Preflight runs every check the resolved stage needs, before anything is created 
 | Check | Stages |
 |---|---|
 | On a feature branch with commits ahead of `origin/develop`; `origin/develop` exists | all |
-| `claude` and `git` are on PATH, and `uv` when `ship_setup` starts with it; with the project's tooling, the pre-push hook is installed | all |
+| `claude` and `git` are on PATH, and the program `ship_setup` starts with; with the project's tooling, the pre-push hook is installed | all |
+| The program each `fix_checks` command starts with is on PATH (a warning, not a failure: the review runs without that check) | all, skill's tooling |
 | `uv` is on PATH | `verify_deploy` |
 | `.shiprc` values are valid: the stage is a known value, numbers are integers | all |
 | `gh auth status`, or `az account show` plus the `azure-devops` extension with org and project defaults set | `open_pr` and up |
@@ -314,6 +317,8 @@ The ship's settings are in `.shiprc` at the repo root, which stays out of git an
 
 **First run.** A plan, kickoff or `set-ship-stage.sh` in a repo without `.shiprc` creates it as a copy of `shiprc.template`. Nothing is copied from `.codereviewrc`. Then, unless something already ignores `.shiprc` or the repo tracks it, `.shiprc` is appended to `.gitignore` and committed on the current branch with `git commit -- .gitignore`, so nothing else staged goes in. The line is added but not committed when `.gitignore` has uncommitted changes, HEAD is detached, the branch is `develop`, the target, `main` or `master`, or the commit fails. Each step prints a `NOTE:` line, which `/ship` relays in the session. The plan does this before it reads HEAD, so the commit is part of the ship and kickoff's `--expect-sha` still matches.
 
+**Toolchain detection.** `lib/toolchain.sh` runs next, on a plan or kickoff of a feature ship with the skill's tooling and `review_agent=claude`. For each of `ship_setup` and `fix_checks` that `.shiprc` doesn't set, one `claude -p` call with only `Read`, `Grep` and `Glob` reads the repo's CI config first, then task runners, manifests, lockfiles and docs, and answers with `SETUP:`, `CHECKS:` and `SOURCE:` lines. The values are appended to `.shiprc` under a comment naming the source and date, with a `NOTE:` line; `none` records that there's nothing to run, so detection doesn't repeat. Checks that aren't one command (`cd`, `&`, `|`, redirection, `$(`, a `VAR=value` prefix or `#`) are dropped with a `NOTE:`, because each check becomes an allow rule matched from its start. A failed call or malformed answer saves nothing and prints a `NOTE:`; the next ship tries again, and the `pyproject.toml` defaults apply meanwhile. The e2e tests stub the agent with a fake `claude` on PATH.
+
 These are the ship keys in `.shiprc`:
 
 ```
@@ -346,6 +351,8 @@ deploy_smoke_timeout=900
 ```
 
 Repos on the skill's review tooling also have `review_docs` (see Documented intent) and `fix_checks`.
+
+The review's agents run headless with `--permission-mode dontAsk`, so a command outside their allow list is denied, never prompted. Both review passes and the verifier may run `git diff`, `git log`, `git show`, `git status` and each `fix_checks` command; the fixer may also edit files. An allow rule matches a command from its start, so the prompts tell every agent to run each check as written, on its own, from the repo root. They also tell the reviewers not to change files, since they share the worktree, and to say when a finding rests on behavior they couldn't run because no checks are configured.
 
 The existing keys stay: `pr_host`, `pr_merge_method`, `pr_self_approve`, `pr_poll_interval`, `pr_poll_timeout` and `ship_fix_retries`.
 

@@ -39,6 +39,8 @@ fi
 review_sh="$skill_scripts/code-review.sh"
 # shellcheck source=review-docs.sh
 source "$skill_scripts/lib/review-docs.sh"
+# shellcheck source=toolchain.sh
+source "$skill_scripts/lib/toolchain.sh"
 decisions_sh="$project_root/scripts/decisions.sh"
 [ -f "$decisions_sh" ] || decisions_sh="$skill_scripts/decisions.sh"
 
@@ -154,7 +156,8 @@ rc_default_extra() {
         # The skill's review finds the project's documents (lib/review-docs.sh).
         review_docs) echo auto ;;
         # Run in a new worktree before the push, so the review's fixer and the
-        # repo's hooks have its dependencies.
+        # repo's hooks have its dependencies; none runs nothing. The first ship
+        # usually sets it in .shiprc (lib/toolchain.sh), so this is the fallback.
         ship_setup) [ -f pyproject.toml ] && echo 'uv sync -q' ;;
         ship_fix_retries) echo 1 ;;
         ship_log_retention_days) echo 30 ;;

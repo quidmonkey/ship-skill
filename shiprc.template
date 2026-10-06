@@ -44,13 +44,17 @@ ship_fix_retries=1
 ship_stage=open_pr
 
 # Command run in a new ship worktree before the review, so the fixer and the
-# repo's hooks have its dependencies. Defaults to uv sync -q when the repo has
-# a pyproject.toml, otherwise nothing. e.g. npm ci
+# repo's hooks have its dependencies; none runs nothing. The first ship detects
+# it and fix_checks from the repo's CI config and writes both at the end of this
+# file. Without that, it defaults to uv sync -q when the repo has a
+# pyproject.toml, otherwise nothing. e.g. npm ci
 # ship_setup=
 
 # Repos without their own review tooling only (the ship skill runs its own
-# code-review.sh): commands the review's fix agent runs to check its work,
-# separated by ;. Defaults to uv run pre-commit;uv run pytest with a
+# code-review.sh): lint and test commands, separated by ;. The reviewers may run
+# them to confirm a finding, and the fix agent runs them to check its work.
+# Each one is a single command, run as written. Detected on the first ship;
+# without that, defaults to uv run pre-commit;uv run pytest with a
 # pyproject.toml, otherwise none. e.g. npm run lint;npm test
 # fix_checks=
 

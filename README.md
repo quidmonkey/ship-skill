@@ -47,6 +47,8 @@ The ship's settings live in `.shiprc` at the repo root. The first `/ship` in a r
 
 The same run adds `.shiprc` to `.gitignore` and commits that change on your branch, with nothing else in the commit. It skips the commit, leaving the line in place, when `.gitignore` already has uncommitted changes of yours, when HEAD is detached, or when you're on `develop`, `main` or `master`. Nothing is added when something already ignores `.shiprc` or the repo tracks it. Each of these steps prints a `NOTE:` line, and `/ship` passes it on in the session.
 
+The first ship also works out how to install the repo and run its checks, so you don't have to set `ship_setup` or `fix_checks`. One agent call reads the repo's CI config (GitHub Actions, Azure Pipelines, GitLab and others), Makefile or other task runner, `package.json` scripts, `.pre-commit-config.yaml`, lockfiles and README, and picks the commands CI runs. It can only read files. The result goes into `.shiprc` under a comment naming where it came from, and a `NOTE:` line shows it. Later ships read it from there and make no agent call. `none` means there's nothing to run. A check that isn't a single command (one with `cd`, `&&`, a pipe or a `VAR=value` prefix) is left out, because the review's agents may only run a check exactly as written. If detection fails, nothing is saved and the next ship tries again. Detection skips any key you've already set, runs only with the skill's own review and `review_agent=claude`, and doesn't run for a prod release.
+
 In a repo the scaffold skill created, the review keys stay in the project's `.codereviewrc`, since its own pre-push review reads them there. Everywhere else every key, review keys included, goes in `.shiprc`.
 
 ### Documents and source of truth
@@ -68,7 +70,7 @@ The plan's `docs` line shows what was found, and the review report lists it too.
 
 A scaffolded repo's own review reads `docs/` and gets the same order from the scaffold's `CLAUDE.md`.
 
-Two settings depend on the repo's language. `ship_setup` is the command run in a new worktree before the review; it defaults to `uv sync -q` when there's a `pyproject.toml`, and to nothing otherwise. `fix_checks` lists the lint and test commands the review's fixer runs to check its work; it defaults to `uv run pre-commit;uv run pytest` with a `pyproject.toml`, and to none otherwise. For a Node repo, for example:
+Two settings depend on the repo's toolchain, and the first ship detects both (see [The settings file](#the-settings-file)). `ship_setup` is the command run in a new worktree before the review, so the fixer and the repo's git hooks have the dependencies they need. `fix_checks` lists the lint and test commands the review may run. The reviewers run them to confirm a finding, and the fixer runs them to check its work. If detection hasn't saved them, `ship_setup` falls back to `uv sync -q` and `fix_checks` to `uv run pre-commit;uv run pytest` when there's a `pyproject.toml`, and to nothing otherwise. Preflight fails when the program `ship_setup` starts with isn't on PATH, and warns for a missing check program. To set them yourself for a Node repo, for example:
 
 ```
 ship_setup=npm ci
@@ -90,7 +92,7 @@ Without a `Makefile`, call the script directly: `bash ~/.claude/skills/ship/scri
 
 Run `/ship` in a Claude Code session, or `make ship` in a terminal. The ship runs from its own git worktree, so you can keep editing while it works.
 
-1. A read-only plan prints the resolved settings, each tagged with where its value came from, and checks everything the stage needs: CLI logins, reviewers, the deploy target. Nothing is created yet.
+1. A plan prints the resolved settings, each tagged with where its value came from, and checks everything the stage needs: CLI logins, reviewers, the deploy target. It creates no branch or worktree. On a repo's first ship it also creates `.shiprc`, commits the `.gitignore` line, and detects the toolchain (see [The settings file](#the-settings-file)).
 2. You confirm. In a session that's the permission prompt on `ship.sh --detach`. In a terminal it's `Proceed? [y/N]`. Denying leaves everything as it was.
 3. The commit at HEAD is frozen as the branch `ship/<branch>-<sha7>` (`ship/<target>/<branch>-<sha7>` when the target isn't `develop`), checked out in a new worktree at `../<repo>.ship-<id>`. Commits you make afterwards don't join this ship.
 4. The worktree runs `ship_setup`, then reviews and pushes the snapshot branch (see [What a repo needs](#what-a-repo-needs) for which review runs). If the auto-fix clears every REQUIRED finding, the ship commits the fix and pushes again, up to `ship_fix_retries` times. If REQUIRED findings are still open, the ship fails and the report is copied to `.git/ship/<id>/code-review-report.md`.
@@ -155,8 +157,8 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 | Key | Values | Default |
 |-----|--------|---------|
 | `ship_stage` | `push`, `open_pr`, `merge`, `verify_deploy` | `open_pr` |
-| `ship_setup` | command run in a new worktree before the review | `uv sync -q` with a `pyproject.toml`, else none |
-| `fix_checks` | `;`-separated lint and test commands the fixer runs (skill review only) | `uv run pre-commit;uv run pytest` with a `pyproject.toml`, else none |
+| `ship_setup` | command run in a new worktree before the review; `none` runs nothing | detected on the first ship; else `uv sync -q` with a `pyproject.toml`, else none |
+| `fix_checks` | `;`-separated lint and test commands the reviewers and fixer may run (skill review only); `none` runs nothing | detected on the first ship; else `uv run pre-commit;uv run pytest` with a `pyproject.toml`, else none |
 | `review_docs` | `auto`, `none`, or space-separated paths of the documents the review checks against (skill review only) | `auto` |
 | `ship_fix_retries` | times one ship commits an auto-fix and pushes again | `1` |
 | `ship_log_retention_days` | days to keep finished ship logs; `0` keeps them | `30` |
@@ -190,6 +192,7 @@ The smoke test (`deploy_smoke`) runs in the ship's worktree with `DEPLOY_URL`, `
 | `scripts/lib/ship-config.sh` | Picks the project's review tooling or this skill's, checks `ship_contract`, adds the ship keys and defaults |
 | `scripts/code-review.sh`, `scripts/decisions.sh`, `scripts/lib/common.sh` | The review, decision trailers and shared helpers, used in repos without their own. Copies of the scaffold skill's templates, with `fix_checks` added, documents found by `review_docs`, and settings read from `.shiprc` |
 | `scripts/lib/review-docs.sh` | Finds the documents the skill's review checks against |
+| `scripts/lib/toolchain.sh` | Detects the install and check commands on a repo's first ship |
 | `scripts/lib/ship-status.sh`, `scripts/lib/ship-deploy.sh` | Status and event helpers; deploy verification |
 | `scripts/set-ship-stage.sh` | Writes `ship_stage` into the project's `.shiprc` |
 | `ship.mk` | The `make ship*` targets a project includes |

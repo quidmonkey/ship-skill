@@ -67,6 +67,21 @@ echo fixed >> app.txt
 echo "Fix summary"; echo "FIXED app.txt:1"
 EOF
 
+# A fake claude on PATH, so no check calls the real one. It records its
+# arguments, answers toolchain discovery from $sb/discover (failing when that
+# file is missing), and passes every review.
+mkdir -p "$sb/bin"
+cat > "$sb/bin/claude" <<EOF
+printf '%s\n' "\$@" >> "$sb/claude-args"
+case "\$*" in
+    *"Work out how this repository installs"*) [ -f "$sb/discover" ] || exit 1; cat "$sb/discover"; exit 0 ;;
+esac
+echo "No findings."; echo "VERDICT: PASS"
+EOF
+chmod +x "$sb/bin/claude"
+export PATH="$sb/bin:$PATH"
+discoveries() { grep -c "Work out how this repository installs" "$sb/claude-args" 2>/dev/null; }
+
 # new_repo <name> [settings-file] — a repo on feature/x, one commit ahead of
 # origin/develop, with the stub agents set in .shiprc, or in the named file
 # (a scaffolded repo's .codereviewrc, which its .gitignore would ignore).
@@ -110,6 +125,8 @@ expect "first plan creates .shiprc" "NOTE: created \.shiprc with the default shi
 expect "first plan commits .shiprc to .gitignore" "NOTE: added \.shiprc to \.gitignore and committed it on feature/x" "$out"
 assert "the new .shiprc is the template" "$(diff .shiprc "$skill/shiprc.template")" cmp -s .shiprc "$skill/shiprc.template"
 expect ".codereviewrc settings aren't used" "review_agent +claude +default" "$out"
+expect "a failed discovery says the next ship retries" "NOTE: couldn't detect this repo's install and check commands; the next ship tries again" "$out"
+refute "a failed discovery saves nothing" "^(ship_setup|fix_checks)=" "$(cat .shiprc)"
 cat "$sb/stubs" >> .shiprc
 out=$(bash "$ship" --plan --stage push 2>&1)
 expect "settings are read from .shiprc" "review_agent +custom +\.shiprc" "$out"
@@ -151,6 +168,7 @@ prompts=$(cat "$sb/prompts")
 expect "no docs: tests outrank code" "highest authority first: tests > code" "$prompts"
 expect "no docs: missing docs aren't a finding" "Missing documentation is not a finding" "$prompts"
 refute "no docs: docs/design.md isn't assumed" "docs/design.md\\. If" "$prompts"
+expect "no checks: the reviewer is told it can't run the code" "so you can't run the$" "$prompts"
 assert "passing ship exits 0 (rc=$rc)" "$out" [ "$rc" -eq 0 ]
 snap="ship/feature/x-${sha:0:7}"
 assert "origin has $snap" "$(git ls-remote origin)" on_origin "$snap"
@@ -190,6 +208,23 @@ files=$(git show --name-only --format= "origin/$asnap")
 expect "auto-fix commit has the fix" "^app.txt$" "$files"
 refute "auto-fix commit has no working/ or settings" "working/|shiprc|codereviewrc" "$files"
 assert "leftover worktree replaced and cleaned" "$(git worktree list)" no_extra_worktrees
+
+# A pre-commit hook that rewrites files fails the first auto-fix commit; its
+# changes are staged and the second try goes through.
+echo again >> app.txt
+git commit -qam "Change again"
+printf '#!/bin/sh\ngrep -q formatted app.txt && exit 0\necho formatted >> app.txt\nexit 1\n' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "auto-fix ship passes a rewriting hook" "shipped to push" "$out"
+fsnap=$(snapshot_of "$(latest)")
+expect "the auto-fix commit has the hook's rewrite" "^formatted$" "$(git show "origin/$fsnap:app.txt" 2>&1)"
+echo once-more >> app.txt
+git commit -qam "Change once more" --no-verify
+printf '#!/bin/sh\necho "hook says no" >&2\nexit 1\n' > .git/hooks/pre-commit
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "a rejected auto-fix commit names the hook" "the repo's pre-commit hook rejected the auto-fix commit" "$out"
+rm .git/hooks/pre-commit
 
 # The repo's own pre-push hook still runs after the review.
 echo third >> app.txt
@@ -319,6 +354,56 @@ expect "the worktree is synced" "Setting up the worktree: uv sync -q" "$out"
 expect "python ship passes" "shipped to push" "$out"
 out=$(bash "$ship" --plan --stage push --sets 'ship_setup=false' 2>&1)
 expect "ship_setup can be overridden" "ship_setup +false" "$out"
+
+# --- toolchain discovery: the first ship works out ship_setup and fix_checks -------
+
+echo "== toolchain discovery"
+new_repo toolchain
+# No settings: review_agent is claude, so the plan discovers the toolchain.
+: > .shiprc
+cat > "$sb/discover" <<'EOF'
+Found the commands in CI.
+SETUP: git --version
+CHECKS: git status;cd sub && make test;FOO=1 npm test
+SOURCE: .github/workflows/ci.yml
+EOF
+: > "$sb/claude-args"
+out=$(bash "$ship" --plan --stage push 2>&1)
+expect "discovery notes what it saved" "NOTE: detected ship_setup=git --version and fix_checks=git status from \.github/workflows/ci\.yml\. Saved in \.shiprc\.$" "$out"
+expect "discovery notes the dropped checks" "NOTE: left out of fix_checks .*: cd sub && make test; FOO=1 npm test\.$" "$out"
+expect "discovery saves ship_setup" "^ship_setup=git --version$" "$(cat .shiprc)"
+expect "discovery saves only single-command checks" "^fix_checks=git status$" "$(cat .shiprc)"
+expect "the plan shows the saved setup" "ship_setup +git --version +\.shiprc" "$out"
+expect "the discovery agent can only read" "^Read,Grep,Glob$" "$(cat "$sb/claude-args")"
+out=$(bash "$ship" --plan --stage push 2>&1)
+refute "a later plan doesn't discover again" "NOTE: detected" "$out"
+assert "discovery ran once" "$(discoveries)" [ "$(discoveries)" = 1 ]
+out=$(bash "$ship" --plan --stage push --sets 'ship_setup=nosuch-setup-tool install;fix_checks=nosuch-check-tool run' 2>&1)
+expect "a missing setup program fails preflight" "nosuch-setup-tool isn't on PATH" "$out"
+expect "a missing check program only warns" "nosuch-check-tool isn't on PATH, so the review can't run 'nosuch-check-tool run'" "$out"
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "the ship runs the detected setup" "Setting up the worktree: git --version" "$out"
+expect "discovered ship passes" "shipped to push" "$out"
+
+# --- review_agent=claude: the reviewers may run fix_checks -------------------------
+
+echo "== claude agents"
+new_repo agents
+cat > .shiprc <<'EOF'
+ship_setup=none
+fix_checks=make test;npm run lint
+EOF
+: > "$sb/claude-args"
+out=$(bash "$ship" --yes --stage push 2>&1)
+expect "claude-agent ship passes" "shipped to push" "$out"
+refute "set keys aren't discovered" "NOTE: detected" "$out"
+refute "ship_setup=none runs nothing" "Setting up the worktree" "$out"
+args=$(cat "$sb/claude-args")
+expect "the reviewer may run each check" "^Read,Grep,Glob,Bash\(git diff:\*\).*,Bash\(make test:\*\),Bash\(npm run lint:\*\)$" "$args"
+expect "the reviewer is told it may run the checks" "You may run these lint and test commands" "$args"
+expect "the prompt lists the checks" "^    npm run lint$" "$args"
+expect "the prompt says to run checks exactly as written" "starting exactly as written here" "$args"
+refute "the reviewer gets no write tools" "^Read,Edit" "$args"
 
 # --- a scaffolded repo: the project's tooling and pre-push hook -------------------
 

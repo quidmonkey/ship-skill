@@ -155,7 +155,10 @@ case "$mode" in
     status) ship_status_report "$ship_id"; exit ;;
     stop) ship_stop "$ship_id"; exit ;;
     watch) ship_watch "$ship_id"; exit ;;
-    plan | run) ship_rc_init ;;
+    plan | run)
+        ship_rc_init
+        $prod || toolchain_init
+        ;;
 esac
 
 # --- configuration ---------------------------------------------------------------
@@ -534,8 +537,17 @@ prod_pr_open() {
     esac
 }
 
+# command_program <command> — the program a command runs, for the PATH check:
+# its first word, unless the command is empty or none or starts with VAR=value.
+command_program() {
+    local prog rest
+    read -r prog rest <<< "$1"
+    case "$prog" in '' | none | *=*) return 1 ;; esac
+    printf '%s\n' "$prog"
+}
+
 preflight() {
-    local t d owner open tools="claude git"
+    local t d owner open check tools="claude git"
     branch=""
     if $prod; then
         preflight_prod
@@ -544,7 +556,15 @@ preflight() {
     fi
 
     if ! $prod; then
-        case "$cfg_ship_setup" in uv | uv\ *) tools="$tools uv" ;; esac
+        t=$(command_program "$cfg_ship_setup") && tools="$tools $t"
+        # A missing check program doesn't stop the ship: the review still
+        # runs, but it can't run that check.
+        if [ "$review_tooling" = skill ]; then
+            while IFS= read -r check; do
+                t=$(command_program "$check") && ! command -v "$t" >/dev/null 2>&1 \
+                    && pf_warn "$t isn't on PATH, so the review can't run '$check' from fix_checks. Install it, or change fix_checks in $ship_rc."
+            done <<< "$(printf '%s\n' "$cfg_fix_checks" | tr ';' '\n')"
+        fi
     fi
     stage_at_least verify_deploy && tools="$tools uv"
     for t in $tools; do
@@ -728,6 +748,11 @@ review_blocked() {
     fi
 }
 
+commit_autofix() {
+    git commit -q -m "Apply code review auto-fix" \
+        -m "Auto-fix resolved the REQUIRED findings from the pre-push code review."
+}
+
 stage_push() {
     local attempt=0 retries=$cfg_ship_fix_retries msg p keep_out=()
     cur_stage=push
@@ -750,9 +775,15 @@ stage_push() {
         copy_report
         if [ -f "$autofix_marker" ] && [ "$attempt" -lt "$retries" ]; then
             git add -A -- . ${keep_out[@]+"${keep_out[@]}"}
-            if ! git commit -q -m "Apply code review auto-fix" \
-                -m "Auto-fix resolved the REQUIRED findings from the pre-push code review."; then
-                fail_stage push "the auto-fix left nothing to commit; see $ship_dir/code-review-report.md"
+            git diff --cached --quiet \
+                && fail_stage push "the auto-fix left nothing to commit; see $ship_dir/code-review-report.md"
+            # A pre-commit hook that rewrites files (a formatter) fails the
+            # commit; its changes are staged and the commit tried once more.
+            # The re-push reviews them with the rest of the fix.
+            if ! commit_autofix; then
+                git add -A -- . ${keep_out[@]+"${keep_out[@]}"}
+                commit_autofix \
+                    || fail_stage push "the repo's pre-commit hook rejected the auto-fix commit; see $ship_dir/ship.log"
             fi
             attempt=$((attempt + 1))
             ship_event "$ship_dir" push running "committed the review auto-fix, pushing again (retry $attempt of $retries)"
@@ -1184,7 +1215,7 @@ if ! $prod; then
         [ -f "$p" ] && cp "$p" "$worktree/$p"
     done
     mkdir -p "$worktree/working"
-    if [ -n "$cfg_ship_setup" ]; then
+    if [ -n "$cfg_ship_setup" ] && [ "$cfg_ship_setup" != none ]; then
         echo "Setting up the worktree: $cfg_ship_setup"
         (cd "$worktree" && sh -c "$cfg_ship_setup") || rollback "ship_setup ($cfg_ship_setup) failed in $worktree."
     fi

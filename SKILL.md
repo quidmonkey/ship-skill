@@ -1,6 +1,6 @@
 ---
 name: ship
-version: 1.3.0
+version: 1.4.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and verify the dev deploy, as far as the
@@ -51,7 +51,7 @@ Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A
 
 Run `bash ~/.claude/skills/ship/scripts/ship.sh --plan [--target ...] [--stage ...] [--sets '...']`. It prints the config block, then `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=` lines.
 
-The plan is read-only except on the first ship in a repo without `.shiprc`. That plan creates `.shiprc` from the skill's template, adds it to `.gitignore`, and commits `.gitignore` on the current branch. It prints a `NOTE:` line for each step. Tell the developer about every `NOTE:` line, word for word, before the config block. One that says the change wasn't committed names why; pass that on too.
+The plan is read-only except on the first ship in a repo without `.shiprc`. That plan creates `.shiprc` from the skill's template, adds it to `.gitignore`, and commits `.gitignore` on the current branch. It also detects the repo's install and check commands (`ship_setup` and `fix_checks`) and saves them in `.shiprc`, which can take up to a minute. It prints a `NOTE:` line for each step. Don't ask the developer to set `ship_setup` or `fix_checks`; detection does that. Tell the developer about every `NOTE:` line, word for word, before the config block. One that says the change wasn't committed names why; pass that on too.
 
 ### 3. Reviewers (open_pr only)
 

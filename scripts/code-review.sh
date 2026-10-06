@@ -84,7 +84,8 @@ fix_model=$(rc_value fix_model)
 fix_effort=$(rc_value fix_effort)
 fix_cmd=$(rc_value fix_command)
 fix_max_iterations=$(rc_value fix_max_iterations)
-# The fixer's lint and test commands, ;-separated; empty when none apply.
+# The lint and test commands, ;-separated; empty when none apply. The fixer runs
+# them to check its work, and the reviewers may run them to confirm a finding.
 fix_checks=$(rc_value fix_checks)
 # Seconds any one agent call may run before it's killed and counted as failed.
 agent_timeout=$(rc_value agent_timeout)
@@ -180,6 +181,9 @@ effort_flags_for() {
 # the prompt on stdin and ignores model and effort.
 # git status is allowed: the verification prompt needs it to see untracked files
 # the fixer added, and a headless -p run has no prompt to approve it with.
+# Both agents may also run the fix_checks commands (check_rules), so a review
+# can confirm a behavior finding by running the tests instead of reasoning
+# about it.
 #
 # Both agents are sandboxed the same way (claude_sandbox_flags):
 #   --setting-sources user  keeps .claude/settings.json out: its Stop hooks would
@@ -190,6 +194,15 @@ effort_flags_for() {
 #   --permission-mode dontAsk  denies anything --allowed-tools doesn't cover.
 # The prompt is an argument, so stdin is closed: otherwise -p waits on it.
 claude_sandbox_flags=(--setting-sources user --permission-mode dontAsk)
+git_rules="Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)"
+
+# check_rules prints a ,Bash(<command>:*) allow rule for each fix_checks command.
+check_rules() {
+    local check
+    while IFS= read -r check; do
+        [ -n "$check" ] && printf ',Bash(%s:*)' "$check"
+    done <<< "$(fix_check_list)"
+}
 
 run_review_agent() {
     local effort_flags
@@ -199,7 +212,7 @@ run_review_agent() {
             # ${a[@]+...}: bash 3.2 treats an empty array as unbound under set -u.
             with_timeout "$agent_timeout" claude -p "$1" --model "$2" ${effort_flags[@]+"${effort_flags[@]}"} "${claude_sandbox_flags[@]}" \
                 --tools "Read,Grep,Glob,Bash" \
-                --allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)" < /dev/null
+                --allowed-tools "Read,Grep,Glob,$git_rules$(check_rules)" < /dev/null
             ;;
         custom)
             printf '%s\n' "$1" | with_timeout "$agent_timeout" sh -c "$custom_cmd"
@@ -208,15 +221,12 @@ run_review_agent() {
 }
 
 # run_fix_agent reads the fix prompt as $1 and edits the working tree in place.
-# Unlike the review agent it gets write tools, plus the checks it must not break;
-# a custom command receives the prompt on stdin instead.
+# Unlike the review agent it gets write tools; a custom command receives the
+# prompt on stdin instead.
 run_fix_agent() {
-    local effort_flags allowed check
+    local effort_flags allowed
     effort_flags_for "$fix_effort"
-    allowed="Read,Edit,Write,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)"
-    while IFS= read -r check; do
-        [ -n "$check" ] && allowed="$allowed,Bash($check:*)"
-    done <<< "$(fix_check_list)"
+    allowed="Read,Edit,Write,Grep,Glob,$git_rules$(check_rules)"
     case "$fix_agent" in
         claude)
             with_timeout "$agent_timeout" claude -p "$1" --model "$fix_model" ${effort_flags[@]+"${effort_flags[@]}"} "${claude_sandbox_flags[@]}" \
@@ -229,10 +239,10 @@ run_fix_agent() {
     esac
 }
 
-# fix_check_list — fix_checks, one trimmed command per line.
+# fix_check_list — fix_checks, one trimmed command per line; none lists nothing.
 fix_check_list() {
     printf '%s\n' "$fix_checks" | tr ';' '\n' \
-        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$'
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -vx -e '' -e none
 }
 
 # --- diff range --------------------------------------------------------------
@@ -434,6 +444,29 @@ and what could regress unnoticed). A finding with no concrete scenario is
 SUGGESTED.
 EOF
 
+# The fix_checks commands, one per indented line, for the prompts. The allow
+# rules match a command only from its start, so a check run after cd or && is
+# denied; checks_how says so in every prompt that lists them.
+checks_block=$(fix_check_list | sed 's/^/    /')
+checks_how="Run each one from the repository root as a command of its own, starting exactly as written here; one placed after cd, &&, ; or a pipe is denied."
+
+# What every review-agent prompt says about running the code. The reviewers may
+# run the fix_checks commands (check_rules); they share the worktree with each
+# other and with the fixer's edits, so they must not change files.
+if [ -n "$checks_block" ]; then
+    read -r -d '' checks_rule <<EOF || true
+You may run these lint and test commands to confirm a finding, adding arguments
+where they help. Don't change any file: skip a command or option that rewrites
+files. Note which findings you confirmed by running a command. $checks_how
+$checks_block
+EOF
+else
+    read -r -d '' checks_rule <<'EOF' || true
+No lint or test commands are configured (fix_checks), so you can't run the
+code. When a finding rests on behavior you couldn't run, say so.
+EOF
+fi
+
 # Closing instruction for every review-agent prompt; finish_pass enforces it.
 read -r -d '' verdict_rule <<'EOF' || true
 End with your verdict, as plain text with no bold, backticks, or other
@@ -475,6 +508,8 @@ there is one, for this project's coding and testing guidelines.
 
 $authority
 
+$checks_rule
+
 Review the changes for, in priority order:
 - Correctness: logic errors, wrong conditions or boundaries, unhandled None or
   empty inputs, broken error handling, race conditions, callers the change breaks,
@@ -507,6 +542,8 @@ Scope: the changes in git range $range. Start with:
     git diff $range
 
 $authority
+
+$checks_rule
 
 $spec_scope
 - Nothing reverses a recorded decision below, or brings back an alternative it
@@ -573,17 +610,17 @@ EOF
 # the section/console line. Returns non-zero if the fixer could not run, so the
 # loop can stop.
 apply_fixes() {
-    local label=$1 fix_prompt status=0 checks verify_rule
+    local label=$1 fix_prompt status=0 verify_rule
     if [ "$fix_agent" = "claude" ] && ! command -v claude >/dev/null 2>&1; then
         echo "WARNING: 'claude' not found — cannot auto-fix. Fix REQUIRED findings manually." >&2
         return 1
     fi
 
-    checks=$(fix_check_list | sed 's/^/    /')
-    if [ -n "$checks" ]; then
+    if [ -n "$checks_block" ]; then
         verify_rule="- Verify before finishing: run each of these, adding arguments where they
   help (for example --files <changed files>). A fix that breaks them is not a fix.
-$checks"
+  $checks_how
+$checks_block"
     else
         verify_rule="- No lint or test commands are configured (fix_checks), so you can't run
   them. Say so in the summary."
@@ -675,6 +712,8 @@ and read any new untracked files; they are part of the fix. Read surrounding
 source, CLAUDE.md, and the documents named below as needed.
 
 $authority
+
+$checks_rule
 
 Judge each REQUIRED or OPEN finding from the findings file:
 - RESOLVED: the fix removes the failure scenario, or makes the code match the doc.
