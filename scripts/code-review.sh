@@ -628,7 +628,7 @@ while :; do
 
     if verify_fixes " (iteration $iteration)"; then
         echo ""
-        if [ -z "$(git status --porcelain)" ]; then
+        if [ -z "$(ship_changes)" ]; then
             # Nothing to commit: every finding was disputed and the dispute
             # upheld. Getting past the gate from here is a human decision.
             echo "Every REQUIRED finding was disputed and the verifier accepted the disputes;"

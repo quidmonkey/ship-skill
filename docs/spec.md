@@ -49,7 +49,7 @@ Stages are cumulative. Each one includes everything before it.
 | `SKILL.md` | The `/ship` skill: plan, start, follow, report, status, stop, retry |
 | `scripts/ship.sh` | Orchestrates one ship: plan, preflight, worktree, stages. `--plan` prints the config block. Runs in the foreground by default, or `--detach` for the background. `--status`, `--stop` and `--watch` wrap the status helpers. `--retry` resumes a failed or stopped ship |
 | `scripts/lib/ship-config.sh` | Loads the helpers, sets `ship_base`, creates `.shiprc` and adds it and the review's report files to `.git/info/exclude` |
-| `scripts/lib/common.sh` | Every setting key and its default, `rc_*` to read and write `.shiprc`, the review ledger, `with_timeout` |
+| `scripts/lib/common.sh` | Every setting key and its default, `rc_*` to read and write `.shiprc`, the paths a ship never commits, the review ledger, `with_timeout` |
 | `scripts/code-review.sh` | The two-pass review and fix loop, run in the worktree before each push |
 | `scripts/decisions.sh` | Reads `Decision:` and `Rejected:` commit trailers |
 | `scripts/lib/review-docs.sh` | Finds the documents of intended behavior (see Documented intent) |

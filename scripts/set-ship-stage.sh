@@ -8,13 +8,14 @@
 #
 # Usage:
 #   set-ship-stage.sh <stage>    # make ship-stage STAGE=<stage>
-# Run from the project root; it writes the project's .shiprc, creating it
-# first if it's missing (see ship_rc_init).
+# Writes the .shiprc at the repo root, creating it first if it's missing (see
+# ship_rc_init), from any directory in the repo.
 set -u
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib/ship-config.sh
 source "$script_dir/lib/ship-config.sh"
+cd "$project_root" || exit 1
 
 stages="push open_pr merge verify_deploy"
 

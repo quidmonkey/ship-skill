@@ -119,7 +119,7 @@ while [ $# -gt 0 ]; do
             done
             shift
             ;;
-        -h | --help) sed -n '2,/^# plan), it refuses/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,/^$/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown argument '$1' (see --help)." ;;
     esac
     shift
@@ -1182,7 +1182,7 @@ preflight_retry() {
         [ "$stage" != open_pr ] \
             || [ "$(git rev-parse -q --verify "refs/remotes/origin/$ship_dev")" = "$snapshot_sha" ] \
             || pf_fail "origin/$ship_dev moved past the planned $sha7, so the PR would release commits nobody planned. Run /ship $ship_base again."
-    elif [ -n "$(git -C "$worktree" status --porcelain)" ]; then
+    elif [ -n "$(cd "$worktree" && ship_changes)" ]; then
         pf_fail "The worktree $worktree has uncommitted changes (the review's auto-fix?), so a retry wouldn't ship what was reviewed. Commit a fix on $source_branch, then /ship again."
     elif [ "$stage" != push ]; then
         local_sha=$(git rev-parse -q --verify "refs/heads/$snapshot")

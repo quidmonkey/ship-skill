@@ -254,9 +254,14 @@ out=$(bash "$skill/scripts/set-ship-stage.sh" merge 2>&1)
 expect "set-ship-stage writes the stage" "ship_stage=merge written to \.shiprc" "$out"
 expect "set-ship-stage writes .shiprc" "^ship_stage=merge$" "$(grep '^ship_stage=' .shiprc | tail -n 1)"
 refute "settings stay out of git status" "shiprc" "$(git status --porcelain)"
-bash "$skill/scripts/set-ship-stage.sh" push > /dev/null 2>&1
+mkdir -p sub
+out=$(cd sub && bash "$skill/scripts/set-ship-stage.sh" push 2>&1)
+expect "set-ship-stage from a subdirectory writes the root .shiprc" "^ship_stage=push$" "$(grep '^ship_stage=' .shiprc | tail -n 1)"
+assert "set-ship-stage writes no .shiprc in the subdirectory" "$out" [ ! -f sub/.shiprc ]
+rmdir sub
 assert "exclude lines aren't duplicated" "$(cat .git/info/exclude)" \
     [ "$(grep -cxF working/code-review-report.md .git/info/exclude)" = 1 ]
+expect "--help prints the whole usage" "the target or the release notes changed since that plan\.$" "$(bash "$ship" --help)"
 
 # --- a documented repo: the review finds docs/ and README.md ----------------------
 
@@ -388,6 +393,11 @@ refute "the reviewer gets no write tools" "^Read,Edit" "$args"
 
 echo "== retry"
 new_repo retry
+# A tracked .shiprc with personal edits is copied into the worktree, where it
+# shows as modified; that mustn't count as uncommitted work at retry.
+git add -f .shiprc
+git commit -qm "Track ship settings"
+echo "# personal edit" >> .shiprc
 # A fake gh whose login expires at the first PR create while $sb/gh-expire
 # exists. Its PRs merge on the first poll, with the head in $sb/gh-head.
 mkdir -p "$sb/ghbin"

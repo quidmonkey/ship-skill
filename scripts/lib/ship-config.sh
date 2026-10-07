@@ -19,16 +19,6 @@ source "$skill_scripts/lib/toolchain.sh"
 review_sh="$skill_scripts/code-review.sh"
 decisions_sh="$skill_scripts/decisions.sh"
 
-# The ship's personal settings. ship_rc_init creates the file and keeps it
-# out of git through .git/info/exclude.
-ship_rc=.shiprc
-
-# ship_local_paths — paths a ship writes that must never be committed: the
-# review's reports and personal settings. Files rather than all of working/,
-# so a repo that tracks its own working/ keeps committing it.
-ship_local_paths="working/code-review-report.md working/code-review-findings.md
-working/code-review-fix-summary.md $autofix_marker $ship_rc"
-
 # ship_exclude_local — adds each of ship_local_paths to the repo's local
 # excludes (.git/info/exclude, never committed) unless it's already ignored,
 # already listed, or tracked (an exclude can't hide a tracked file; the

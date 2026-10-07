@@ -14,6 +14,27 @@
 # to be committed. Excluded from git, like the report.
 autofix_marker="working/autofix-pending.marker"
 
+# The ship's personal settings. ship_rc_init (lib/ship-config.sh) creates the
+# file and keeps it out of git through .git/info/exclude.
+ship_rc=.shiprc
+
+# ship_local_paths — paths a ship writes that must never be committed: the
+# review's reports and personal settings. Files rather than all of working/,
+# so a repo that tracks its own working/ keeps committing it.
+ship_local_paths="working/code-review-report.md working/code-review-findings.md
+working/code-review-fix-summary.md $autofix_marker $ship_rc"
+
+# ship_changes — git status --porcelain without ship_local_paths. A tracked
+# .shiprc with personal edits is copied into the ship worktree, so it shows
+# as modified there, but it's never part of what ships.
+ship_changes() {
+    local p specs=()
+    for p in $ship_local_paths; do
+        specs+=(":(exclude)$p")
+    done
+    git status --porcelain -- . "${specs[@]}"
+}
+
 # Every key .shiprc understands. An override (--set or CR_<KEY>) naming
 # anything else is a typo and fails, so it can't be silently ignored.
 rc_known_keys="ship_stage pr_reviewers pr_host pr_merge_method pr_self_approve
