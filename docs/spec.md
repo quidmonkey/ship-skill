@@ -20,7 +20,7 @@ The skill lives at `~/.claude/skills/ship` and is its own git repo. Nothing is c
 - Deploy verification is one command the project supplies (`deploy_check`). The ship doesn't know about pipelines or cloud providers. An earlier version polled ADO and GitHub pipeline runs and checked Cloud Run and Agent Runtime health through `gcloud`. It was dropped: it needed 11 settings, `uv` and `gcloud`, covered only two GCP targets, and had no end-to-end test.
 - Each ship has its own log directory, pruned 30 days after it finishes.
 - Settings are kept to the choices a developer makes per repo or per run: the stage, reviewers, merge behavior, toolchain, review model and effort, and the deploy check. Values nobody tunes per repo are fixed in the scripts: the second-pass and fix models, one auto-fix retry, the 15-second poll and 30-day log retention. Custom (non-Claude) review and fix agents and a switch to turn the review off were removed.
-- Commits, squash messages, PR descriptions and release notes from a ship carry no agent attribution.
+- Commits, squash messages and PR descriptions from a ship carry no agent attribution.
 - Only `.shiprc` is copied into the worktree. There's no setting for copying other ignored files.
 - `.shiprc` is per developer and kept out of git through `.git/info/exclude`. A committed `.gitignore` line was rejected: it meant a plan, which is otherwise read-only, committed on the developer's branch, and it needed rules for when not to (dirty `.gitignore`, detached HEAD, on `develop`).
 - A developer never has to configure the toolchain. The first feature ship detects `ship_setup` and `fix_checks` with one read-only agent call and saves them in `.shiprc`. Giving the review agents unrestricted Bash, so they could work out the commands on each ship, was rejected: the worktree isn't a sandbox.
@@ -70,7 +70,7 @@ Stages are cumulative. Each one includes everything before it.
 1. Read `.shiprc` and the overrides, and resolve the stage.
 2. Refuse if HEAD is detached, if the current branch is the target, `develop`, `main` or `master`, or if the branch has no commits ahead of `origin/<target>`. Warn about uncommitted changes; they aren't part of the ship. Refuse if a running ship already has the same source branch and HEAD SHA.
 3. Run preflight for the resolved stage (see Preflight).
-4. Generate the ship ID (`<yyyymmdd-hhmmss>-<sha7>`) and print the config block: the snapshot branch and worktree path, the target, the documents the review will check against, the settings the stage uses plus any other override or non-default value, each with its source, the accounts, the preflight results and warnings. The block ends with `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=passed|failed` lines for the skill to read. `SHIP_CONFIG` is the first 12 characters of `git hash-object` over every resolved `key=value`, the target and the release notes.
+4. Generate the ship ID (`<yyyymmdd-hhmmss>-<sha7>`) and print the config block: the snapshot branch and worktree path, the target, the documents the review will check against, the settings the stage uses plus any other override or non-default value, each with its source, the accounts, the preflight results and warnings. The block ends with `SHIP_ID=`, `SHIP_SHA=`, `SHIP_CONFIG=` and `SHIP_PREFLIGHT=passed|failed` lines for the skill to read. `SHIP_CONFIG` is the first 12 characters of `git hash-object` over every resolved `key=value` and the target.
 
 Then the developer confirms:
 
@@ -80,7 +80,7 @@ Then the developer confirms:
 
 ### 2. Kickoff
 
-5. Run `ship.sh --id <id> --expect-sha <sha> --expect-config <hash>` with the plan's overrides. If HEAD moved, or any setting, the target or the release notes now resolve differently, refuse and ask for a new `/ship`.
+5. Run `ship.sh --id <id> --expect-sha <sha> --expect-config <hash>` with the plan's overrides. If HEAD moved, or any setting or the target now resolves differently, refuse and ask for a new `/ship`.
 6. Prune expired ship directories (see Retention).
 7. Create the snapshot branch `ship/<branch>-<sha7>` at HEAD, or `ship/<target>/<branch>-<sha7>` for a target other than `develop`, so one commit shipped to two targets gets two branches. Seed its review-ledger entry from the source branch's, so commits already reviewed aren't reviewed again.
 8. Create the worktree at `../<repo>.ship-<id>` on the snapshot branch, copy `.shiprc` into it, create `working/`, and run `ship_setup`.
@@ -97,7 +97,7 @@ The snapshot freezes the commit being shipped. Later commits on the developer's 
 
 ### 4. open_pr
 
-Open a PR from the snapshot branch into the target with `gh pr create` or `az repos pr create`, titled with the source branch name. The body lists the commits, the recorded decisions, and the review summary. `pr_reviewers` are added: GitHub users or `org/team`, ADO emails or `[Project]\Team` (added as optional). Record the PR URL, ID and reviewers.
+Open a PR from the snapshot branch into the target with `gh pr create` or `az repos pr create`, titled with the source branch name. The body is one bullet per commit subject, leaving out the review's auto-fix commit. `pr_reviewers` are added: GitHub users or `org/team`, ADO emails or `[Project]\Team` (added as optional). Record the PR URL, ID and reviewers.
 
 At `merge` and above the PR is approved and auto-completed right away, so named reviewers may never see it. The plan warns when `pr_reviewers` is set at those stages.
 
@@ -155,7 +155,6 @@ Each ship's files live in `$(git rev-parse --git-common-dir)/ship/<id>/`, which 
 | `events` | One line per stage transition: `<iso-ts>\t<stage>\t<state>\t<message>` |
 | `ship.log` | Full output from every step |
 | `code-review-report.md` | A copy of the last review report |
-| `release-notes.md` | A prod release's approved notes |
 | `pid` | The process ID, while it's running |
 
 States are `running`, `waiting` (with a blocking reason), `passed`, `failed` and `stopped`. `status.json` is written one `"key": "value"` per line with the config object last, so the scripts read and update it with `sed` and `awk` and nothing needs `jq`.
@@ -217,9 +216,8 @@ Ships of different branches, or different commits on one branch, run side by sid
 `/ship main` (or `master`, or `make ship BRANCH=main`) releases `develop` into that branch.
 
 1. **Plan.** Preflight fetches `develop` and the target and freezes `origin/develop`'s tip as `SHIP_SHA`. It skips the feature-branch checks: the current checkout and its uncommitted changes don't matter. It warns if the target has commits `develop` lacks, such as a hotfix.
-2. **Release notes.** The skill drafts notes from `git log --no-merges origin/<target>..<SHIP_SHA>` and the recorded decisions into `<git-common-dir>/ship/release-notes.md`, and plans again with `--notes-file`. The notes' hash is part of `SHIP_CONFIG`. Without `--notes-file`, the description is the commit subjects and decisions.
-3. **Confirm.** The skill posts the notes and the config block, and the permission prompt is the confirmation.
-4. **Run.** No snapshot branch, worktree or push; the stages run from the checkout and touch only the PR host and remote refs. The PR is titled `prod 🚀`. `merge` always uses a merge commit and never deletes `develop`. On GitHub, `gh pr merge --match-head-commit` pins the merge to `SHIP_SHA`, and on both hosts each poll fails the ship if the PR's head moved. `verify_deploy` runs `deploy_check` from the checkout with `DEPLOY_BRANCH` set to the target.
+2. **Confirm.** The skill posts the config block, and the permission prompt is the confirmation.
+3. **Run.** No snapshot branch, worktree or push; the stages run from the checkout and touch only the PR host and remote refs. The PR is titled `prod 🚀` with no description. `merge` always uses a merge commit and never deletes `develop`. On GitHub, `gh pr merge --match-head-commit` pins the merge to `SHIP_SHA`, and on both hosts each poll fails the ship if the PR's head moved. `verify_deploy` runs `deploy_check` from the checkout with `DEPLOY_BRANCH` set to the target.
 
 GitHub doesn't let you approve your own PR, so with `pr_self_approve` the merge still waits for any review that branch protection requires.
 

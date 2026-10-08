@@ -9,11 +9,11 @@ ship_stage_sh = bash "$(SHIP_SKILL)/scripts/set-ship-stage.sh"
 
 .PHONY: ship ship-plan ship-stage ship-status ship-watch ship-stop
 
-ship: ## Review, push and ship the branch into develop from a worktree (BRANCH= STAGE= SET= NOTES= DETACH=1 YES=1)
+ship: ## Review, push and ship the branch into develop from a worktree (BRANCH= STAGE= SET= DETACH=1 YES=1)
 	@$(ship_sh) $(ship_args) $(call ship_flag,DETACH,--detach) $(call ship_flag,YES,--yes) \
 		$(call ship_arg,ID,--id "$$ID") $(call ship_arg,SHA,--expect-sha "$$SHA") $(call ship_arg,CONFIG,--expect-config "$$CONFIG")
 
-ship-plan: ## Show the config make ship would use and check it; creates nothing (BRANCH= STAGE= SET= NOTES=)
+ship-plan: ## Show the config make ship would use and check it; creates nothing (BRANCH= STAGE= SET=)
 	@$(ship_sh) --plan $(ship_args)
 
 ship-stage: ## Set how far make ship goes: STAGE=push|open_pr|merge|verify_deploy
@@ -34,5 +34,5 @@ ship-stop: ## Stop a running ship (ID= when more than one is running)
 #   make ship SET='deploy_check=make check-deploy ENV=dev;review_model=sonnet'
 ship_arg = $(if $(filter command line,$(origin $(1))),$(2))
 ship_flag = $(if $(filter command line,$(origin $(1))),$(if $(filter 1 true yes,$($(1))),$(2)))
-ship_args = $(call ship_arg,BRANCH,--target "$$BRANCH") $(call ship_arg,NOTES,--notes-file "$$NOTES") \
+ship_args = $(call ship_arg,BRANCH,--target "$$BRANCH") \
 	$(call ship_arg,STAGE,--stage "$$STAGE") $(call ship_arg,SET,--sets "$$SET")

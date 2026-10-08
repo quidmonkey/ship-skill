@@ -261,7 +261,7 @@ assert "set-ship-stage writes no .shiprc in the subdirectory" "$out" [ ! -f sub/
 rmdir sub
 assert "exclude lines aren't duplicated" "$(cat .git/info/exclude)" \
     [ "$(grep -cxF working/code-review-report.md .git/info/exclude)" = 1 ]
-expect "--help prints the whole usage" "the target or the release notes changed since that plan\.$" "$(bash "$ship" --help)"
+expect "--help prints the whole usage" "or the target changed since that plan\.$" "$(bash "$ship" --help)"
 
 # --- a documented repo: the review finds docs/ and README.md ----------------------
 
@@ -399,7 +399,8 @@ git add -f .shiprc
 git commit -qm "Track ship settings"
 echo "# personal edit" >> .shiprc
 # A fake gh whose login expires at the first PR create while $sb/gh-expire
-# exists. Its PRs merge on the first poll, with the head in $sb/gh-head.
+# exists. It writes each PR's body to $sb/gh-body. Its PRs merge on the first
+# poll, with the head in $sb/gh-head.
 mkdir -p "$sb/ghbin"
 cat > "$sb/ghbin/gh" <<EOF
 case "\$1 \$2" in
@@ -407,6 +408,7 @@ case "\$1 \$2" in
     "api user") echo tester ;;
     "pr create")
         if [ -f "$sb/gh-expire" ]; then rm -f "$sb/gh-auth" "$sb/gh-expire"; echo "gh: login required" >&2; exit 1; fi
+        while [ \$# -gt 0 ]; do [ "\$1" = --body ] && printf '%s' "\$2" > "$sb/gh-body"; shift; done
         echo "https://github.com/o/r/pull/7"
         ;;
     "pr review" | "pr merge") ;;
@@ -435,6 +437,8 @@ expect "retry resumes at open_pr" "resumed in the background at open_pr" "$out"
 expect "retry uses the settings the ship started with" "gh +tester" "$out"
 out=$(bash "$ship" --watch "$rid" 2>&1)
 expect "the retried ship opens the PR" "shipped to open_pr\. PR: https://github.com/o/r/pull/7" "$out"
+expect "the PR body lists the commits" "^- " "$(cat "$sb/gh-body")"
+refute "the PR body is only commit bullets" "^[^-]" "$(cat "$sb/gh-body")"
 refute "the watch starts at the retry" "^push " "$out"
 assert "the retry doesn't review again" "$(cat "$sb/prompts" 2>/dev/null | wc -l) != $reviews" \
     [ "$(cat "$sb/prompts" 2>/dev/null | wc -l)" = "$reviews" ]
@@ -476,6 +480,7 @@ expect "a prod release takes ship_stage from .shiprc" "ship_stage +verify_deploy
 expect "a prod plan passes" "SHIP_PREFLIGHT=passed" "$out"
 out=$(bash "$ship" --yes --target main --sets 'pr_host=gh;pr_reviewers=' 2>&1)
 expect "a prod release runs to verify_deploy" "shipped to verify_deploy" "$out"
+assert "a prod PR has no description" "$(cat "$sb/gh-body")" [ ! -s "$sb/gh-body" ]
 expect "deploy_check gets the prod target" " main$" "$(cat "$sb/deploy-env" 2>&1)"
 export PATH=$path_before
 

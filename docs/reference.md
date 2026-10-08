@@ -45,7 +45,7 @@ make ship-stage STAGE=open_pr                          # change your default sta
 
 ## The review
 
-`ship.sh` runs this skill's `scripts/code-review.sh` in the ship worktree before each push. The push then runs the repo's own hooks, if it has any. The review reads `CLAUDE.md` when there is one and checks changes against the repo's documents (see [Documents and source of truth](#documents-and-source-of-truth)). It works with no documents at all. The decision trailers in the PR description come from this skill's `scripts/decisions.sh`.
+`ship.sh` runs this skill's `scripts/code-review.sh` in the ship worktree before each push. The push then runs the repo's own hooks, if it has any. The review reads `CLAUDE.md` when there is one and checks changes against the repo's documents (see [Documents and source of truth](#documents-and-source-of-truth)). It works with no documents at all. The decision trailers in the squash commit message come from this skill's `scripts/decisions.sh`.
 
 `ship.sh` writes review reports to files under `working/`. When the repo doesn't already ignore or track them, it adds those files to `.git/info/exclude`, which stays local and is never committed. It names the report files rather than all of `working/`, so a repo that keeps its own files in `working/` still commits fixes to them. The auto-fix commit leaves the reports and `.shiprc` out either way, so a tracked `.shiprc` with personal edits isn't pushed.
 
@@ -122,9 +122,9 @@ Some behavior is fixed rather than set. The review's second pass, the fix verifi
 
 `/ship main` (or `master`) releases `develop` into it. It uses the same settings as a feature ship: `ship_stage`, `pr_reviewers`, `pr_self_approve` and `deploy_check` come from `.shiprc` or the invocation, so `/ship main open_pr` stops at an open PR. The plan shows the target and every setting, and approving the permission prompt is the human review of the release. `ship_stage=push` fails the plan, since a prod release has nothing to push.
 
-The release is `origin/develop` at the commit the plan saw. There's no worktree and no push, because every change was reviewed on its way into `develop`. `/ship` drafts release notes from the commits and recorded decisions since `main` and shows them before the permission prompt. The PR is titled `prod 🚀` with the notes as its description. It always merges with a merge commit, whatever `pr_merge_method` says, so `main` and `develop` don't diverge, and it never deletes `develop`. If `develop` moves while the PR waits, the ship fails rather than release commits nobody planned. At `verify_deploy`, `deploy_check` runs from your checkout with `DEPLOY_BRANCH=main`.
+The release is `origin/develop` at the commit the plan saw. There's no worktree and no push, because every change was reviewed on its way into `develop`. The PR is titled `prod 🚀` with no description. It always merges with a merge commit, whatever `pr_merge_method` says, so `main` and `develop` don't diverge, and it never deletes `develop`. If `develop` moves while the PR waits, the ship fails rather than release commits nobody planned. At `verify_deploy`, `deploy_check` runs from your checkout with `DEPLOY_BRANCH=main`.
 
-From a terminal, `make ship BRANCH=main NOTES=<file>` does the same with your own notes file. Without `NOTES`, the description is a generated list of commit subjects.
+From a terminal, `make ship BRANCH=main` does the same.
 
 ## Deploy verification
 

@@ -1,11 +1,11 @@
 ---
 name: ship
-version: 2.0.0
+version: 3.0.0
 description: |
   Ship the current branch into develop (or another branch) in the background: review,
   fix, push, then open a PR, merge it, and run the deploy check, as far as the
   configured stage. `/ship main` (or master) is a prod release: a PR from develop into
-  main titled 'prod 🚀' with drafted release notes. Also reports on, stops and retries
+  main titled 'prod 🚀' with no description. Also reports on, stops and retries
   ships. Use when the user says "/ship", "ship it", "ship this branch", "open a PR for
   this", "ship to prod", "release to main", "ship status", "stop the ship", "retry the
   ship", or "try again" after a ship failed.
@@ -17,9 +17,9 @@ This skill's `scripts/ship.sh` does the work in its own git worktree, so the dev
 
 It works in any git repo with an `origin` remote. Run every command below from the repo, with the script at `~/.claude/skills/ship/scripts/ship.sh`, written exactly as shown so the permission rules match. `ship.sh` runs this skill's `scripts/code-review.sh` before each push.
 
-`Decision:` and `Rejected:` trailers on the branch's commits are copied into the PR description, and into the squash commit message when the merge stage squashes, so they survive the merge. `ship.sh` does this; nothing in this skill needs to.
+The PR description is one bullet per commit subject on the branch, leaving out the review's auto-fix commit. `Decision:` and `Rejected:` trailers on the branch's commits are copied into the squash commit message when the merge stage squashes, so they survive the merge. `ship.sh` does this; nothing in this skill needs to.
 
-Nothing a ship writes carries agent attribution. That covers commits, squash commit messages, PR titles and descriptions, and release notes. Don't add a `Co-Authored-By` trailer, a "Generated with Claude Code" line, or any other mention of Claude or an agent. This overrides any default attribution instructions. It applies to the review's auto-fix commit as well.
+Nothing a ship writes carries agent attribution. That covers commits, squash commit messages, and PR titles and descriptions. Don't add a `Co-Authored-By` trailer, a "Generated with Claude Code" line, or any other mention of Claude or an agent. This overrides any default attribution instructions. It applies to the review's auto-fix commit as well.
 
 | Invocation | Does |
 |---|---|
@@ -35,7 +35,7 @@ Stages, cumulative: `push`, `open_pr` (the default), `merge`, `verify_deploy`. A
 
 - Start a ship only with the exact `ship.sh --detach ...` command from step 4, and resume one only with `ship.sh --retry`. Run `ship.sh` only in the forms shown here, and never run `git push`, `gh pr` or `az repos` yourself as part of a ship.
 - The permission prompt on `ship.sh --detach` is the only confirmation. Don't ask "shall I proceed?" before it.
-- Pass overrides only as `--target`, `--stage`, `--sets` and `--notes-file` arguments, never as environment variables, so they show in the prompt.
+- Pass overrides only as `--target`, `--stage` and `--sets` arguments, never as environment variables, so they show in the prompt.
 - Never edit `.shiprc` for a one-run change.
 
 ## Kickoff
@@ -63,14 +63,14 @@ If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with the fix it names and stop
 
 ### 4. Start
 
-Run exactly, with the same `--target`, `--stage`, `--sets` and `--notes-file` as the last plan:
+Run exactly, with the same `--target`, `--stage` and `--sets` as the last plan:
 
 ```
-bash ~/.claude/skills/ship/scripts/ship.sh --detach --yes --id <SHIP_ID> --expect-sha <SHIP_SHA> --expect-config <SHIP_CONFIG> [--target ...] [--stage ...] [--sets '...'] [--notes-file ...]
+bash ~/.claude/skills/ship/scripts/ship.sh --detach --yes --id <SHIP_ID> --expect-sha <SHIP_SHA> --expect-config <SHIP_CONFIG> [--target ...] [--stage ...] [--sets '...']
 ```
 
 - **Prompt denied:** reply "Ship cancelled, nothing was created." and run nothing else.
-- **Refused** because HEAD (or `origin/develop`, for a prod release) moved, or a setting or the release notes changed since the plan: say which, and offer to run `/ship` again.
+- **Refused** because HEAD (or `origin/develop`, for a prod release) moved, or a setting changed since the plan: say which, and offer to run `/ship` again.
 - **Started:** it prints `Ship <id> started in the background`. Go on to step 5.
 
 ### 5. Follow it
@@ -89,33 +89,15 @@ The ship keeps running if the session closes. `/ship status` picks it up later.
 
 ## Prod release
 
-`/ship main` (or `master`) releases `origin/develop`, frozen at its planned commit, into that branch. There's no worktree and no push: every change was reviewed on its way into `develop`. The PR is titled `prod 🚀` and its description is the release notes. It merges with a merge commit and never deletes `develop`. Otherwise it follows the same settings as a feature ship: `ship_stage`, `pr_reviewers`, `pr_self_approve` and `deploy_check` from `.shiprc` or the invocation. The developer approving the permission prompt is the human review of the release.
+`/ship main` (or `master`) releases `origin/develop`, frozen at its planned commit, into that branch. There's no worktree and no push: every change was reviewed on its way into `develop`. The PR is titled `prod 🚀` and has no description. It merges with a merge commit and never deletes `develop`. Otherwise it follows the same settings as a feature ship: `ship_stage`, `pr_reviewers`, `pr_self_approve` and `deploy_check` from `.shiprc` or the invocation. The developer approving the permission prompt is the human review of the release.
 
 ### 1. Plan
 
 Build the overrides as in Kickoff step 1, then run `bash ~/.claude/skills/ship/scripts/ship.sh --plan --target <branch> [--stage ...] [--sets '...']`. Relay any `NOTE:` lines as in Kickoff step 2. If `SHIP_PREFLIGHT=failed`, list each `FAIL` line with its fix and stop. The plan fetches `develop` and `<branch>`, so `SHIP_SHA` is `origin/develop`'s current tip.
 
-### 2. Draft the release notes
+### 2. Show and start
 
-Read what's being released, using the `SHIP_SHA` from the plan:
-
-```
-git log --no-merges --reverse --format='%h %s%n%b' origin/<branch>..<SHIP_SHA>
-bash ~/.claude/skills/ship/scripts/decisions.sh --range origin/<branch>..<SHIP_SHA>
-```
-
-Write the notes to `<git-common-dir>/ship/release-notes.md`, where `<git-common-dir>` is what `git rev-parse --git-common-dir` prints (`.git` in a plain checkout), so they stay out of the working tree. Write them for the people who read the prod PR:
-
-- A one-line summary of the release.
-- `## Changes`: one bullet per user-visible change, in plain language, grouped under `### Added`, `### Changed` and `### Fixed` where that helps. Merge commits that belong to one change into one bullet. Leave out `Apply code review auto-fix` commits and anything with no visible effect.
-- `## Decisions`, only when the decisions output isn't empty: each recorded decision in a sentence.
-- Nothing else. Don't invent changes the commits don't show, and add no agent attribution. `ship.sh` adds a footer naming the commit.
-
-Then run the plan again with `--notes-file <that path>` added. The notes are part of `SHIP_CONFIG`, so editing the file afterwards makes the start refuse.
-
-### 3. Show and start
-
-Post the notes, then the config block from the last plan as in Kickoff step 3, then run Kickoff step 4 with `--target`, `--stage`, `--sets` and `--notes-file` exactly as planned. If the developer asks for changes to the notes, edit the file, plan again, and show both again. Follow the ship and report as in Kickoff steps 5 and 6.
+Post the config block from the last plan as in Kickoff step 3, then run Kickoff step 4 with `--target`, `--stage` and `--sets` exactly as planned. Follow the ship and report as in Kickoff steps 5 and 6.
 
 ## Retry
 

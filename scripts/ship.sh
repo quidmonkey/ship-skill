@@ -6,7 +6,7 @@
 # A prod ship (--target main or master) instead opens a PR from origin/develop,
 # frozen at its planned commit, into that branch: no worktree and no push
 # (every change was reviewed on its way into develop). The PR is titled
-# 'prod 🚀' with the --notes-file release notes as its description, and it
+# 'prod 🚀' with no description, and it
 # merges with a merge commit and never deletes develop. Otherwise it follows
 # the same settings as a feature ship.
 #
@@ -26,8 +26,8 @@
 #             runs in the background like --detach.
 #
 # Usage:
-#   ship.sh --plan [--target B] [--notes-file F] [--stage S] [--set k=v ...] [--sets 'k=v;k=v']
-#   ship.sh [--target B] [--notes-file F] [--stage S] [--set ...] [--detach] [--yes]
+#   ship.sh --plan [--target B] [--stage S] [--set k=v ...] [--sets 'k=v;k=v']
+#   ship.sh [--target B] [--stage S] [--set ...] [--detach] [--yes]
 #           [--id ID --expect-sha SHA --expect-config HASH]
 #   ship.sh --status [ID] | --stop [ID] | --watch [ID]
 #   ship.sh --retry [ID]   (default: the latest ship)
@@ -41,8 +41,8 @@
 #
 # Without --id, kickoff shows the plan and asks Proceed? [y/N] on a terminal,
 # and refuses without one unless --yes. With --id (what /ship passes after its
-# plan), it refuses if HEAD (origin/develop for prod), any resolved setting,
-# the target or the release notes changed since that plan.
+# plan), it refuses if HEAD (origin/develop for prod), any resolved setting
+# or the target changed since that plan.
 
 # shellcheck disable=SC2154 # cfg_<key> is assigned by resolve_config via printf -v
 set -u
@@ -68,7 +68,6 @@ expect_sha=""
 expect_config=""
 set_keys=" "
 target_arg=""
-notes_file=""
 
 # add_set <key=value> — a one-run override, exported as CR_<KEY>.
 add_set() {
@@ -107,7 +106,6 @@ while [ $# -gt 0 ]; do
         --expect-sha) expect_sha=${2:?--expect-sha needs a value}; shift ;;
         --expect-config) expect_config=${2:?--expect-config needs a value}; shift ;;
         --target) target_arg=${2:?--target needs a branch}; shift ;;
-        --notes-file) notes_file=${2:?--notes-file needs a path}; shift ;;
         --stage) add_set "ship_stage=${2:?--stage needs a value}"; shift ;;
         --set) add_set "${2:?--set needs key=value}"; shift ;;
         --sets)
@@ -133,10 +131,6 @@ ship_dev=$ship_base
 if [ -n "$target_arg" ]; then
     git check-ref-format --branch "$target_arg" >/dev/null 2>&1 || die "'$target_arg' isn't a valid branch name."
     ship_base=$target_arg
-fi
-if [ -n "$notes_file" ]; then
-    [ -f "$notes_file" ] || die "release notes file '$notes_file' doesn't exist."
-    notes_file=$(cd "$(dirname "$notes_file")" && pwd)/$(basename "$notes_file")
 fi
 
 # set_prod — a prod ship targets main or master. Set again after --resume
@@ -189,9 +183,9 @@ cfg() {
     printf '%s' "${!name}"
 }
 
-# config_hash — a hash of every resolved setting, the target and the release
-# notes. The plan prints it; kickoff refuses if it no longer matches, so the
-# approved config and notes are the ones that run.
+# config_hash — a hash of every resolved setting and the target. The plan
+# prints it; kickoff refuses if it no longer matches, so the approved config
+# is the one that runs.
 config_hash() {
     local key
     {
@@ -200,7 +194,6 @@ config_hash() {
             printf '%s=%s\n' "$key" "$(cfg "$key")"
         done
         printf 'target=%s\n' "$ship_base"
-        [ -n "$notes_file" ] && printf 'notes=%s\n' "$(git hash-object "$notes_file")"
     } | git hash-object --stdin | cut -c1-12
 }
 
@@ -493,11 +486,6 @@ preflight_prod() {
     fi
     [ "$cfg_ship_stage" != push ] \
         || pf_fail "ship_stage=push stops before the PR, and a prod ship has nothing to push. Use /ship $ship_base open_pr (or a later stage)."
-    if [ -n "$notes_file" ]; then
-        pf_ok "release notes: $notes_file"
-    else
-        pf_warn "No --notes-file: the PR description will be the generated commit list."
-    fi
 }
 
 # prod_pr_open — the URL of an open PR from ship_dev into ship_base, if any.
@@ -606,7 +594,6 @@ print_block() {
     if $prod; then
         printf '  %-24s %s\n' source "origin/$ship_dev @ $sha7"
         printf '  %-24s %s\n' target "$ship_base (PROD release, PR titled 'prod 🚀', merges with a merge commit)"
-        printf '  %-24s %s\n' notes "${notes_file:-(generated commit list)}"
     else
         printf '  %-24s %s\n' source "${branch:-(detached)} @ $sha7"
         printf '  %-24s %s\n' snapshot "$snapshot"
@@ -768,73 +755,27 @@ stage_push() {
     done
 }
 
+# pr_body — one bullet per commit subject, auto-fix commits left out.
+# Decisions reach the merge through the commits themselves, or squash_body
+# when the merge squashes. A prod PR has no description.
 pr_body() {
-    local decisions
-    echo "Shipped from \`$source_branch\` at $(printf '%s' "$snapshot_sha" | cut -c1-7) by /ship ($ship_id)."
-    echo ""
-    echo "## Commits"
-    echo ""
-    git log --reverse --format='- %s' "origin/$ship_base..HEAD"
-    echo ""
-    decisions=$(bash "$decisions_sh" --range "origin/$ship_base..HEAD")
-    if [ -n "$decisions" ]; then
-        echo "## Decisions"
-        echo ""
-        echo '```'
-        echo "$decisions"
-        echo '```'
-        echo ""
-    fi
-    echo "## Code review"
-    echo ""
-    if [ -f "$ship_dir/code-review-report.md" ]; then
-        echo "The pre-push review passed."
-        sed -n '/^## /q;/^- /p' "$ship_dir/code-review-report.md"
-        echo ""
-        echo "Full report on the shipper's machine: \`.git/ship/$ship_id/code-review-report.md\`"
-    else
-        echo "Every commit was already reviewed by an earlier passing ship."
-    fi
-}
-
-# prod_pr_body — the release notes the developer approved, or a generated
-# commit list (auto-fix commits left out) with the recorded decisions.
-prod_pr_body() {
-    local range="origin/$ship_base..$snapshot_sha" decisions
-    if [ -f "$ship_dir/release-notes.md" ]; then
-        cat "$ship_dir/release-notes.md"
-    else
-        echo "## Changes"
-        echo ""
-        git log --no-merges --reverse --format='- %s' "$range" | grep -vx -e '- Apply code review auto-fix'
-        decisions=$(bash "$decisions_sh" --range "$range")
-        if [ -n "$decisions" ]; then
-            echo ""
-            echo "## Decisions"
-            echo ""
-            echo '```'
-            echo "$decisions"
-            echo '```'
-        fi
-    fi
-    echo ""
-    echo "---"
-    echo "Releases \`$ship_dev\` at $(printf '%s' "$snapshot_sha" | cut -c1-7) into \`$ship_base\`, opened by /ship ($ship_id)."
+    $prod && return
+    git log --no-merges --reverse --format='- %s' "origin/$ship_base..HEAD" \
+        | grep -vx -e '- Apply code review auto-fix'
 }
 
 stage_open_pr() {
     local body url id r head title
-    local reviewers=() reviewer_args=()
+    local reviewers=() reviewer_args=() description_args=()
     cur_stage=open_pr
     if $prod; then
         head=$ship_dev
         title="prod 🚀"
-        body=$(prod_pr_body)
     else
         head=$snapshot
         title=$source_branch
-        body=$(pr_body)
     fi
+    body=$(pr_body)
     ship_event "$ship_dir" open_pr running "opening a PR from $head into $ship_base"
     while IFS= read -r r; do
         [ -n "$r" ] && reviewers+=("$r")
@@ -850,8 +791,10 @@ stage_open_pr() {
         az)
             # ADO reviewers are added as optional.
             [ -n "$cfg_pr_reviewers" ] && reviewer_args=(--reviewers "${reviewers[@]}")
+            [ -n "$body" ] && description_args=(--description "$body")
             id=$(az repos pr create --source-branch "$head" --target-branch "$ship_base" \
-                --title "$title" --description "$body" \
+                --title "$title" \
+                ${description_args[@]+"${description_args[@]}"} \
                 ${reviewer_args[@]+"${reviewer_args[@]}"} \
                 --query pullRequestId -o tsv) \
                 || fail_stage open_pr "az repos pr create failed; see $ship_dir/ship.log"
@@ -1275,7 +1218,7 @@ if [ -n "$planned_id" ]; then
     [ -z "$expect_sha" ] || [ "$expect_sha" = "$head_sha" ] \
         || die "$($prod && echo "origin/$ship_dev" || echo HEAD) moved since the plan (planned ${expect_sha:0:7}, now $sha7). Run /ship again to plan this commit."
     [ -z "$expect_config" ] || [ "$expect_config" = "$plan_hash" ] \
-        || die "a setting, the target or the release notes changed since the plan (config $expect_config, now $plan_hash). Run /ship again to see the new config."
+        || die "a setting or the target changed since the plan (config $expect_config, now $plan_hash). Run /ship again to see the new config."
     [ ! -d "$(ship_root)/$ship_id" ] || die "ship $ship_id already exists. Run /ship again for a new plan."
 fi
 if [ -n "$pf_fails" ]; then
@@ -1322,9 +1265,6 @@ fi
 
 ship_dir="$(ship_root)/$ship_id"
 mkdir -p "$ship_dir"
-# Copied so the approved notes are the ones the PR gets, whatever happens to
-# the file afterwards.
-[ -n "$notes_file" ] && cp "$notes_file" "$ship_dir/release-notes.md"
 status_init "$ship_dir/status.json" "$(config_json)"
 status_set "$ship_dir/status.json" id "$ship_id"
 status_set "$ship_dir/status.json" source_branch "$branch"
